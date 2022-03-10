@@ -1,0 +1,35 @@
+# @package _group_
+name: default
+
+G_kwargs:
+    class_name: "training.networks.Generator"
+    z_dim: 512
+    w_dim: 512
+
+    mapping_kwargs:
+        num_layers: ${spec.map}
+
+    synthesis_kwargs:
+        num_fp16_res: ${num_fp16_res}
+        channel_base: ${spec.fmaps}
+        channel_max: 512
+        conv_clamp: 256
+        architecture: skip
+
+D_kwargs:
+    class_name: "training.networks.Discriminator"
+    epilogue_kwargs:
+        mbstd_group_size: ${spec.mbstd}
+
+    num_fp16_res: ${num_fp16_res}
+    channel_base: ${spec.fmaps}
+    channel_max: 512
+    conv_clamp: 256
+    architecture: resnet
+
+# loss kwargs
+loss_kwargs:
+    pl_batch_shrink: 2
+    pl_decay: 0.01
+    pl_weight: 2
+    style_mixing_prob: 0.9

@@ -1,0 +1,14 @@
+# @package _group_
+
+name: nerf32
+ref_gpus: 8
+kimg: 25000
+mb: 64
+mbstd: 8
+fmaps: 0.5
+lrate: 0.0025
+lrate_disc: 0.0025
+gamma: 0.003
+ema: 20
+ramp: ~
+map: 8

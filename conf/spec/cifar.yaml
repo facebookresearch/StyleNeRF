@@ -1,0 +1,13 @@
+# @package _group_
+
+name: cifar
+ref_gpus: 2
+kimg: 100000
+mb: 64
+mbstd: 32
+fmaps: 1
+lrate: 0.0025
+gamma: 0.01
+ema: 500
+ramp: 0.05
+map: 2

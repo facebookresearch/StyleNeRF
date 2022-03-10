@@ -1,0 +1,14 @@
+# @package _group_
+
+name: paper1024
+ref_gpus: 8
+kimg: 25000
+mb: 32
+mbstd: 4
+fmaps: 1
+lrate: 0.002
+lrate_disc: 0.002
+gamma: 2
+ema: 10
+ramp: ~
+map: 8

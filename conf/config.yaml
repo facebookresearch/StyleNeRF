@@ -1,0 +1,49 @@
+defaults:
+  - _self_
+  - model: default
+  - spec: paper512
+
+# general options
+outdir: ~
+dry_run: False
+debug: False
+resume_run: ~
+
+snap: 50    # Snapshot interval [default: 50 ticks]
+imgsnap: 10
+metrics: [ "fid50k_full" ]
+seed: 2
+num_fp16_res: 4
+auto: False
+
+# dataset
+data: ~
+resolution: ~
+cond: False
+subset: ~   # Train with only N images: <int>, default = all
+mirror: False
+
+# discriminator augmentation
+aug: noaug
+p: ~
+target: ~
+augpipe: ~
+
+# transfer learning
+resume: ~
+freezed: ~
+
+# performance options
+fp32: False
+nhwc: False
+allow_tf32: False
+nobench: False
+workers: 3
+
+launcher: "spawn"
+partition: ~
+comment: ~
+gpus: ~     # Number of GPUs to use [default: 1]
+port: ~
+nodes: ~
+timeout: ~

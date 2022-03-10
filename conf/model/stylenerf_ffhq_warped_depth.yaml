@@ -1,0 +1,97 @@
+# @package _group_
+name: stylenerf_ffhq_warped_depth
+
+G_kwargs:
+    class_name: "training.networks.Generator"
+    z_dim: 512
+    w_dim: 512
+
+    mapping_kwargs:
+        num_layers: ${spec.map}
+
+    synthesis_kwargs:
+        # global settings
+        num_fp16_res: ${num_fp16_res}
+        channel_base: 1
+        channel_max: 1024
+        conv_clamp: 256
+        kernel_size: 1
+        architecture: skip
+        upsample_mode: "nn_cat"
+
+        z_dim_bg: 0
+        z_dim: 0
+        resolution_vol: 32
+        resolution_start: 32
+        rgb_out_dim: 256
+
+        use_noise: False
+        module_name: "training.stylenerf.NeRFSynthesisNetwork"
+        no_bbox: True
+        margin: 0
+        magnitude_ema_beta: 0.999
+
+        camera_kwargs:
+            range_v: [1.4157963267948965, 1.7257963267948966]
+            range_u: [-0.3, 0.3]
+            range_radius: [1.0, 1.0]
+            depth_range: [0.88, 3.2]
+            fov: 12
+            gaussian_camera: True
+            angular_camera: True
+            depth_transform:  InverseWarp
+            dists_normalized: True
+            ray_align_corner: False
+            bg_start: 0.5
+        
+        renderer_kwargs:
+            n_bg_samples: 0
+            n_ray_samples: 48
+            abs_sigma: False
+            hierarchical: True
+            no_background: True
+            
+        foreground_kwargs:
+            positional_encoding: "normal"
+            downscale_p_by: 1
+            use_style: "StyleGAN2"
+            predict_rgb: True
+            use_viewdirs: False
+
+        upsampler_kwargs:
+            channel_base: ${model.G_kwargs.synthesis_kwargs.channel_base}
+            channel_max:  ${model.G_kwargs.synthesis_kwargs.channel_max}
+            no_2d_renderer: False
+            no_residual_img: False
+            block_reses: ~
+            shared_rgb_style: False
+            upsample_type: "bilinear"
+        
+        progressive: True
+
+        # reuglarization
+        n_reg_samples: 16
+        reg_full: True
+
+D_kwargs:
+    class_name: "training.stylenerf.Discriminator"
+    epilogue_kwargs:
+        mbstd_group_size: ${spec.mbstd}
+
+    num_fp16_res: ${num_fp16_res}
+    channel_base: ${spec.fmaps}
+    channel_max: 512
+    conv_clamp: 256
+    architecture: skip
+    progressive: ${model.G_kwargs.synthesis_kwargs.progressive}
+    lowres_head: ${model.G_kwargs.synthesis_kwargs.resolution_start}
+    upsample_type: "bilinear"
+    resize_real_early: True
+
+# loss kwargs
+loss_kwargs:
+    pl_batch_shrink: 2
+    pl_decay: 0.01
+    pl_weight: 2
+    style_mixing_prob: 0.9
+    curriculum: [500,5000]

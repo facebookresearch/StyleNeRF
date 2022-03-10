@@ -1,0 +1,12 @@
+name: paper512
+ref_gpus: 8
+kimg: 25000
+mb: 64
+mbstd: 8
+fmaps: 1
+lrate: 0.0025
+lrate_disc: 0.0025
+gamma: 0.5
+ema: 20
+ramp: ~
+map: 8
