@@ -671,7 +671,7 @@ class VolumeRenderer(object):
     n_ray_samples     = 14
     n_bg_samples      = 4
     n_final_samples   = None    # final nerf steps after upsampling (optional)
-    sigma_type        = 'relu'
+    sigma_type        = 'relu'  # other allowed options including, "abs", "shiftedsoftplus", "exp"
     
     hierarchical      = True
     fine_only         = False
@@ -721,6 +721,8 @@ class VolumeRenderer(object):
             sigma = F.relu(sigma_raw)
         elif self.sigma_type == 'shiftedsoftplus':  # https://arxiv.org/pdf/2111.11215.pdf
             sigma = F.softplus(sigma_raw - 1)       # 1 is the shifted bias.
+        elif self.sigma_type == 'exp_truncated':    # density in the log-space
+            sigma = torch.exp(5 - F.relu(5 - (sigma_raw - 1)))  # up-bound = 5, also shifted by 1
         else:
             sigma = sigma_raw
         return sigma
@@ -813,6 +815,50 @@ class VolumeRenderer(object):
         output.fg_depths  = (di, di_trs)  
         return output
 
+    def forward_sampling(self, H, output, fg_nerf, nerf_input_cams, nerf_input_feats, latent_codes, styles):
+        # TODO: experimental research code. Not functional yet.
+         
+        pixels_world, camera_world, ray_vector = nerf_input_cams
+        z_shape_obj, z_app_obj = latent_codes[:2]
+        height, width = dividable(H.n_points)
+        bound = self.get_bound()
+        
+        # just to simulate
+        H.n_steps = 64
+        di = torch.linspace(0., 1., steps=H.n_steps).to(H.device)
+        di = repeat(di, 's -> b n s', b=H.batch_size, n=H.n_points)
+        if (H.training and (not H.get('disable_noise', False))) or H.get('force_noise', False):
+            di = self.C.add_noise_to_interval(di)
+        di_trs = self.C.get_transformed_depth(di)
+        
+        fg_shape = [H.batch_size, height, width, 1]
+        
+        # iteration in the loop (?)
+        feats, sigmas = [], []
+        with torch.enable_grad():
+            di_trs.requires_grad_(True)
+            for s in range(di_trs.shape[-1]):
+                di_s = di_trs[..., s:s+1]
+                p_i, r_i = self.C.get_evaluation_points(pixels_world, camera_world, di_s)
+                if nerf_input_feats is not None:
+                    p_i = self.I.query_input_features(p_i, nerf_input_feats, fg_shape, bound)        
+                feat, sigma_raw = fg_nerf(p_i, r_i, z_shape_obj, z_app_obj, ws=styles, shape=fg_shape, requires_grad=True)
+                sigma = self.get_density(sigma_raw, fg_nerf, training=H.training)
+            feats += [feat]
+            sigmas += [sigma]
+        feat, sigma = torch.stack(feats, 2), torch.cat(sigmas, 2)
+        fg_weights, bg_lambda = self.C.calc_volume_weights(
+            sigma, di if self.C.dists_normalized else di_trs,  # use real dists for computing weights
+            ray_vector, last_dist=0 if not H.fg_inf_depth else 1e10)[:2]
+        fg_feat = torch.sum(fg_weights.unsqueeze(-1) * feat, dim=-2)
+        
+        output.feat       += [fg_feat]
+        output.full_out   += [feat]
+        output.fg_weights  = fg_weights
+        output.bg_lambda   = bg_lambda
+        output.fg_depths   = (di, di_trs)
+        return output
+        
     def forward_rendering(self, H, output, fg_nerf, nerf_input_cams, nerf_input_feats, latent_codes, styles):
         pixels_world, camera_world, ray_vector = nerf_input_cams
         z_shape_obj, z_app_obj = latent_codes[:2]
