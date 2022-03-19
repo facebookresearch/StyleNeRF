@@ -1958,21 +1958,17 @@ class Discriminator(torch.nn.Module):
         cmap_dim            = None,     # Dimensionality of mapped conditioning label, None = default.
         lowres_head         = None,     # add a low-resolution discriminator head
         dual_discriminator  = False,    # add low-resolution (NeRF) image 
-        dual_input_ratio    = None,     # optional another low-res image input, which will be interpolated to the main input
+        
         block_kwargs        = {},       # Arguments for DiscriminatorBlock.
         mapping_kwargs      = {},       # Arguments for MappingNetwork.
         epilogue_kwargs     = {},       # Arguments for DiscriminatorEpilogue.
+        camera_kwargs       = {},       # Arguments for Camera predictor and condition (optional, refactoring)
         upsample_type       = 'default',
         
         progressive         = False,
         resize_real_early   = False,    # Peform resizing before the training loop
         enable_ema          = False,    # Additionally save an EMA checkpoint
         
-        predict_camera      = False,    # Learn camera predictor as InfoGAN
-        predict_9d_camera   = False,    # Use 9D camera distribution
-        predict_3d_camera   = False,    # Use 3D camera (u, v, r), assuming camera is on the unit sphere
-        no_camera_condition = False,    # Disable camera conditioning in the discriminator
-        saperate_camera     = False,    # by default, only works in the lowest resolution.
         **unused
     ):
         super().__init__()
@@ -1983,41 +1979,48 @@ class Discriminator(torch.nn.Module):
         self.block_resolutions   = [2 ** i for i in range(self.img_resolution_log2, 2, -1)]
         self.architecture        = architecture
         self.lowres_head         = lowres_head
-        self.dual_input_ratio    = dual_input_ratio
+
         self.dual_discriminator  = dual_discriminator
         self.upsample_type       = upsample_type
         self.progressive         = progressive
         self.resize_real_early   = resize_real_early
         self.enable_ema          = enable_ema
-        self.predict_camera      = predict_camera
-        self.predict_9d_camera   = predict_9d_camera
-        self.predict_3d_camera   = predict_3d_camera
-        self.no_camera_condition = no_camera_condition
-        self.separate_camera     = saperate_camera
+        
         if self.progressive:
             assert self.architecture == 'skip', "not supporting other types for now."
-        if self.dual_input_ratio is not None:  # similar to EG3d, concat low/high-res images
-            self.img_channels    = self.img_channels * 2
-        if self.predict_camera:
-            assert not (self.predict_9d_camera and self.predict_3d_camera), "cannot achieve at the same time"
+
         channel_base = int(channel_base * 32768)
         channels_dict = {res: min(channel_base // res, channel_max) for res in self.block_resolutions + [4]}
         fp16_resolution = max(2 ** (self.img_resolution_log2 + 1 - num_fp16_res), 8)
         
         # camera prediction module
+        self.camera_kwargs = EasyDict(
+            predict_camera=False, camera_type='3d', 
+            camera_encoder=True, camera_encoder_progressive=False, camera_disc=True)
+        
+        ## ------ for compitibility ------- #
+        self.camera_kwargs.predict_camera = unused.get('predict_camera', False)
+        self.camera_kwargs.camera_type = '9d' if unused.get('predict_9d_camera', False) else '3d'
+        self.camera_kwargs.camera_disc = not unused.get('no_camera_condition', False)
+        self.camera_kwargs.camera_encoder = unused.get('saperate_camera', False)
+        
+        self.camera_kwargs.update(camera_kwargs)
+        ## ------ for compitibility ------- #
+        
         self.c_dim = c_dim
-        if predict_camera:
-            if not self.no_camera_condition:  
-                if self.predict_3d_camera:
-                    self.c_dim = out_dim = 3     # (u, v) on the sphere
-                else:
-                    self.c_dim = 16              # extrinsic 4x4 (for now)
-                    if self.predict_9d_camera:
-                        out_dim = 9
-                    else:
-                        out_dim = 16            
+        if self.camera_kwargs.predict_camera:
+            if self.camera_kwargs.camera_type == '3d':
+                self.c_dim = out_dim = 3     # (u, v) on the sphere
+            elif self.camera_kwargs.camera_type == '9d':
+                self.c_dim,  out_dim = 16, 9
+            elif self.camera_kwargs.camera_type == '16d':
+                self.c_dim = out_dim = 16
+            else:
+                raise NotImplementedError('Wrong camera type')
+            if not self.camera_kwargs.camera_disc:
+                self.c_dim = c_dim    
             self.projector = EqualConv2d(channels_dict[4], out_dim, 4, padding=0, bias=False)
-                  
+             
         if cmap_dim is None:
             cmap_dim = channels_dict[4]
         if self.c_dim == 0:
@@ -2027,29 +2030,28 @@ class Discriminator(torch.nn.Module):
             
         # main discriminator blocks
         common_kwargs = dict(img_channels=self.img_channels, architecture=architecture, conv_clamp=conv_clamp)    
-        cur_layer_idx = 0
-        for res in self.block_resolutions:
-            in_channels = channels_dict[res] if res < img_resolution else 0
-            tmp_channels = channels_dict[res]
-            out_channels = channels_dict[res // 2]
-            use_fp16 = (res >= fp16_resolution)
-            block = DiscriminatorBlock(in_channels, tmp_channels, out_channels, resolution=res,
-                first_layer_idx=cur_layer_idx, use_fp16=use_fp16, **block_kwargs, **common_kwargs)
-            setattr(self, f'b{res}', block)
-            cur_layer_idx += block.num_layers
         
-        # dual discriminator or separate camera predictor
-        if self.separate_camera or self.dual_discriminator:
+        def build_blocks(layer_name='b', low_resolution=False):
             cur_layer_idx = 0
-            for res in [r for r in self.block_resolutions if r <= self.lowres_head]:
+            block_resolutions = self.block_resolutions
+            if low_resolution:
+                block_resolutions = [r for r in self.block_resolutions if r <= self.lowres_head]
+            for res in block_resolutions:
                 in_channels = channels_dict[res] if res < img_resolution else 0
                 tmp_channels = channels_dict[res]
                 out_channels = channels_dict[res // 2]
+                use_fp16 = (res >= fp16_resolution)
                 block = DiscriminatorBlock(in_channels, tmp_channels, out_channels, resolution=res,
-                    first_layer_idx=cur_layer_idx, use_fp16=False, **block_kwargs, **common_kwargs)
-                setattr(self, f'c{res}', block)
+                    first_layer_idx=cur_layer_idx, use_fp16=use_fp16, **block_kwargs, **common_kwargs)
+                setattr(self, f'{layer_name}{res}', block)
                 cur_layer_idx += block.num_layers
-            
+
+        build_blocks(layer_name='b')  # main blocks
+        if self.dual_discriminator:
+            build_blocks(layer_name='dual', low_resolution=True)
+        if self.camera_kwargs.camera_encoder:
+            build_blocks(layer_name='c', low_resolution=(not self.camera_kwargs.camera_encoder_progressive))
+
         # final output module
         self.b4 = DiscriminatorEpilogue(channels_dict[4], cmap_dim=cmap_dim, resolution=4, **epilogue_kwargs, **common_kwargs)
         self.register_buffer("alpha", torch.scalar_tensor(-1))
@@ -2061,31 +2063,54 @@ class Discriminator(torch.nn.Module):
     def set_resolution(self, res):
         self.curr_status = res
 
-    def get_estimated_camera(self, img, **block_kwargs):
+    def forward_blocks(self, img, alpha, progressive, lowres_head, block_resolutions, layer_name='b', **block_kwargs):
+        if progressive and (self.lowres_head is not None) and (self.alpha > -1) and (self.alpha < 1) and (alpha > 0):
+            img0 = downsample(img, img.size(-1) // 2)
+        x = None if (not progressive) or (block_resolutions[0] == self.img_resolution) \
+            else getattr(self, f'{layer_name}{block_resolutions[0]}').fromrgb(img)
+        
+        for res in block_resolutions:
+            block = getattr(self, f'b{res}')
+            if (lowres_head == res) and (self.alpha > -1) and (self.alpha < 1) and (alpha > 0):
+                if progressive:
+                    if self.architecture == 'skip':
+                        img = img * alpha + img0 * (1 - alpha)        
+                    x = x * alpha + block.fromrgb(img0) * (1 - alpha)
+            x, img = block(x, img, **block_kwargs)
+        
+        return x, img
+        
+    def forward_blocks_progressive(self, img, cam_enc=False, **block_kwargs):
         if isinstance(img, dict):
             img = img['img']
-        img4cam = img.clone()
-        if self.progressive and (img.size(-1) != self.lowres_head):
-            img4cam = downsample(img, self.lowres_head)
-                    
-        c, xc = None, None
-        for res in [r for r in self.block_resolutions if r <= self.lowres_head or (not self.progressive)]:
-            xc, img4cam = getattr(self, f'c{res}')(xc, img4cam, **block_kwargs)
         
-        if self.separate_camera:
-            c = self.projector(xc)[:,:,0,0]
-            if self.predict_9d_camera:
+        block_resolutions, alpha, lowres_head = self.get_block_resolutions(img)
+        layer_name, progressive = 'b', self.progressive
+        
+        if cam_enc and self.camera_kwargs.predict_camera and self.camera_kwargs.camera_encoder:
+            layer_name = 'c'
+            if not self.camera_kwargs.camera_encoder_progressive:
+                block_resolutions, progressive = [r for r in self.block_resolutions if r <= self.lowres_head], False
+                if img.size(-1) != self.lowres_head:
+                    img = downsample(img, self.lowres_head)
+        
+        x, img = self.forward_blocks(
+            img, alpha, progressive, lowres_head, block_resolutions, layer_name, **block_kwargs)
+        c = None
+        
+        if cam_enc:
+            c = self.projector(x)[:,:,0,0]
+            if self.camera_kwargs.camera_type == '9d':
                 c = camera_9d_to_16d(c)    
-        return c, xc, img4cam
+        return c, x, img
 
     def get_camera_loss(self, RT=None, UV=None, c=None):
-        if UV is not None:  # UV has higher priority?
+        if (RT is None) or (UV is None):
+            return None
+        if self.camera_kwargs.camera_type == '3d':  # UV has higher priority?
             return F.mse_loss(UV, c)
-            # lu = torch.stack([(UV[:,0] - c[:, 0]) ** 2, (UV[:,0] - c[:, 0] + 1) ** 2, (UV[:,0] - c[:, 0] - 1) ** 2], 0).min(0).values
-            # return torch.mean(sum(lu + (UV[:,1] - c[:, 1]) ** 2 + (UV[:,2] - c[:, 2]) ** 2))
-        elif RT is not None:
+        else:
             return F.smooth_l1_loss(RT.reshape(RT.size(0), -1), c) * 10
-        return None
 
     def get_block_resolutions(self, input_img):
         block_resolutions = self.block_resolutions
@@ -2112,61 +2137,43 @@ class Discriminator(torch.nn.Module):
         if not isinstance(inputs, dict):
             inputs = {'img': inputs}
         img = inputs['img']
-        block_resolutions, alpha, lowres_head = self.get_block_resolutions(img)
+        block_resolutions, alpha, _ = self.get_block_resolutions(img)
+        
+        # this is to handle real images
         if img.size(-1) > block_resolutions[0]:
             img = downsample(img, block_resolutions[0])
-
-        # this is to handle real images to obtain nerf-size image.
-        if (self.dual_discriminator or (self.dual_input_ratio is not None)) and ('img_nerf' not in inputs):
-            inputs['img_nerf'] = img    
-            if self.dual_discriminator and (inputs['img_nerf'].size(-1) > self.lowres_head):  # using Conv to read image.
-                inputs['img_nerf'] = downsample(inputs['img_nerf'], self.lowres_head)
-            elif self.dual_input_ratio is not None:   # similar to EG3d
-                if inputs['img_nerf'].size(-1) > (img.size(-1) // self.dual_input_ratio):
-                    inputs['img_nerf'] = downsample(inputs['img_nerf'], img.size(-1) // self.dual_input_ratio)
-                img = torch.cat([img, upsample(inputs['img_nerf'], img.size(-1))], 1)
-
-        camera_loss = None
+        if 'img_nerf' not in inputs:
+            inputs['img_nerf'] = downsample(img, self.lowres_head)  
+   
         RT = inputs['camera_matrices'][1].detach() if 'camera_matrices' in inputs else None
         UV = inputs['camera_matrices'][2].detach() if 'camera_matrices' in inputs else None
         
-        # perform separate camera predictor or dual discriminator
-        if self.dual_discriminator or self.separate_camera:
-            temp_img = img if not self.dual_discriminator else inputs['img_nerf']
-            c_nerf, x_nerf, img_nerf = self.get_estimated_camera(temp_img, **block_kwargs)
-            if c.size(-1) == 0 and self.separate_camera:
-                c = c_nerf
-                if self.predict_3d_camera:
-                    camera_loss = self.get_camera_loss(RT, UV, c)
+        # forward separate camera encoder, which can also be progressive...
+        if self.camera_kwargs.camera_encoder:
+            c_nerf, _, _ = self.forward_blocks_progressive(
+                inputs['img_nerf'] if not self.camera_kwargs.camera_encoder_progressive else img, 
+                cam_enc=True, **block_kwargs)
+            if c.size(-1) == 0:
+                c, camera_loss = c_nerf, self.get_camera_loss(RT, UV, c_nerf)
+        
+        # forward another dual discriminator only for low resolution images
+        if self.dual_discriminator:
+            x_nerf, img_nerf = self.forward_blocks(
+                inputs['img_nerf'], alpha, False, self.lowres_head, 
+                [r for r in self.block_resolutions if r <= self.lowres_head], 'dual', **block_kwargs)            
 
         # if applied data augmentation for discriminator
         if aug_pipe is not None:
-            assert self.separate_camera or (not self.predict_camera), "ada may break the camera predictor."
             img = aug_pipe(img)
 
-        # obtain the downsampled image for progressive growing
-        if self.progressive and (self.lowres_head is not None) and (self.alpha > -1) and (self.alpha < 1) and (alpha > 0):
-            img0 = downsample(img, img.size(-1) // 2)
-           
-        x = None if (not self.progressive) or (block_resolutions[0] == self.img_resolution) \
-            else getattr(self, f'b{block_resolutions[0]}').fromrgb(img)
-        for res in block_resolutions:
-            block = getattr(self, f'b{res}')
-            if (lowres_head == res) and (self.alpha > -1) and (self.alpha < 1) and (alpha > 0):
-                if self.architecture == 'skip':
-                    img = img * alpha + img0 * (1 - alpha)
-                if self.progressive:
-                    x = x * alpha + block.fromrgb(img0) * (1 - alpha)
-            x, img = block(x, img, **block_kwargs)
-        
-        # predict camera based on discriminator features
-        if (c.size(-1) == 0) and self.predict_camera and (not self.separate_camera):
-            c = self.projector(x)[:,:,0,0]
-            if self.predict_9d_camera:
-                c = camera_9d_to_16d(c)
-            if self.predict_3d_camera:
-                camera_loss = self.get_camera_loss(RT, UV, c)
+        # perform main discriminator block
+        c_disc, x, img = self.forward_blocks_progressive(
+            img, cam_enc=self.camera_kwargs.predict_camera and (not self.camera_kwargs.camera_encoder), **block_kwargs)
                 
+        # predict camera based on discriminator features
+        if (c.size(-1) == 0) and c_disc is not None:
+            c, camera_loss = c_disc, self.get_camera_loss(RT, UV, c_disc)
+        
         # camera conditional discriminator
         cmap = None
         if self.c_dim > 0:
@@ -2177,7 +2184,7 @@ class Discriminator(torch.nn.Module):
             logits = torch.cat([logits, self.b4(x_nerf, img_nerf, cmap)], 0)
                 
         outputs = {'logits': logits}
-        if self.predict_camera and (camera_loss is not None):
+        if self.camera_kwargs.predict_camera and (camera_loss is not None):
             outputs['camera_loss'] = camera_loss
         if return_camera:
             outputs['camera'] = c
