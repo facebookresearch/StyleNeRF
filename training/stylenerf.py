@@ -2069,9 +2069,8 @@ class Discriminator(torch.nn.Module):
             img = img['img']
         
         block_resolutions, alpha, lowres_head = self.get_block_resolutions(img)
-        if mode == 'disc':
-            layer_name, progressive = 'b', self.progressive
-        elif mode == "cam_enc":        
+        layer_name, progressive = 'b', self.progressive
+        if mode == "cam_enc":        
             assert self.camera_kwargs.predict_camera and self.camera_kwargs.camera_encoder
             layer_name = 'c'
             if not self.camera_kwargs.camera_encoder_progressive:
@@ -2080,9 +2079,7 @@ class Discriminator(torch.nn.Module):
         elif mode == 'dual_disc':
             layer_name = 'dual'
             block_resolutions, progressive = [r for r in self.block_resolutions if r <= self.lowres_head], False
-        else:
-            raise NotImplementedError
-        
+         
         img0 = downsample(img, img.size(-1) // 2) if \
             progressive and (self.lowres_head is not None) and (self.alpha > -1) and (self.alpha < 1) and (alpha > 0) \
             else None            
