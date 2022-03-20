@@ -2062,15 +2062,35 @@ class Discriminator(torch.nn.Module):
     
     def set_resolution(self, res):
         self.curr_status = res
-
-    def forward_blocks(self, img, alpha, progressive, lowres_head, block_resolutions, layer_name='b', **block_kwargs):
-        if progressive and (self.lowres_head is not None) and (self.alpha > -1) and (self.alpha < 1) and (alpha > 0):
-            img0 = downsample(img, img.size(-1) // 2)
+        
+    def forward_blocks_progressive(self, img, mode="disc", **block_kwargs):
+        # mode from ['disc', 'dual_disc', 'cam_enc']
+        if isinstance(img, dict):
+            img = img['img']
+        
+        block_resolutions, alpha, lowres_head = self.get_block_resolutions(img)
+        if mode == 'disc':
+            layer_name, progressive = 'b', self.progressive
+        elif mode == "cam_enc":        
+            assert self.camera_kwargs.predict_camera and self.camera_kwargs.camera_encoder
+            layer_name = 'c'
+            if not self.camera_kwargs.camera_encoder_progressive:
+                block_resolutions, progressive = [r for r in self.block_resolutions if r <= self.lowres_head], False
+                img = downsample(img, self.lowres_head)
+        elif mode == 'dual_disc':
+            layer_name = 'dual'
+            block_resolutions, progressive = [r for r in self.block_resolutions if r <= self.lowres_head], False
+        else:
+            raise NotImplementedError
+        
+        img0 = downsample(img, img.size(-1) // 2) if \
+            progressive and (self.lowres_head is not None) and (self.alpha > -1) and (self.alpha < 1) and (alpha > 0) \
+            else None            
         x = None if (not progressive) or (block_resolutions[0] == self.img_resolution) \
             else getattr(self, f'{layer_name}{block_resolutions[0]}').fromrgb(img)
         
         for res in block_resolutions:
-            block = getattr(self, f'b{res}')
+            block = getattr(self, f'{layer_name}{res}')
             if (lowres_head == res) and (self.alpha > -1) and (self.alpha < 1) and (alpha > 0):
                 if progressive:
                     if self.architecture == 'skip':
@@ -2078,27 +2098,9 @@ class Discriminator(torch.nn.Module):
                     x = x * alpha + block.fromrgb(img0) * (1 - alpha)
             x, img = block(x, img, **block_kwargs)
         
-        return x, img
-        
-    def forward_blocks_progressive(self, img, cam_enc=False, **block_kwargs):
-        if isinstance(img, dict):
-            img = img['img']
-        
-        block_resolutions, alpha, lowres_head = self.get_block_resolutions(img)
-        layer_name, progressive = 'b', self.progressive
-        
-        if cam_enc and self.camera_kwargs.predict_camera and self.camera_kwargs.camera_encoder:
-            layer_name = 'c'
-            if not self.camera_kwargs.camera_encoder_progressive:
-                block_resolutions, progressive = [r for r in self.block_resolutions if r <= self.lowres_head], False
-                if img.size(-1) != self.lowres_head:
-                    img = downsample(img, self.lowres_head)
-        
-        x, img = self.forward_blocks(
-            img, alpha, progressive, lowres_head, block_resolutions, layer_name, **block_kwargs)
         c = None
-        
-        if cam_enc:
+        if (mode == 'cam_enc') or \
+           (mode == 'disc' and self.camera_kwargs.predict_camera and (not self.camera_kwargs.camera_encoder)):
             c = self.projector(x)[:,:,0,0]
             if self.camera_kwargs.camera_type == '9d':
                 c = camera_9d_to_16d(c)    
@@ -2137,12 +2139,12 @@ class Discriminator(torch.nn.Module):
         if not isinstance(inputs, dict):
             inputs = {'img': inputs}
         img = inputs['img']
-        block_resolutions, alpha, _ = self.get_block_resolutions(img)
         
         # this is to handle real images
+        block_resolutions, alpha, _ = self.get_block_resolutions(img)
         if img.size(-1) > block_resolutions[0]:
             img = downsample(img, block_resolutions[0])
-        if 'img_nerf' not in inputs:
+        if self.dual_discriminator and ('img_nerf' not in inputs):
             inputs['img_nerf'] = downsample(img, self.lowres_head)  
    
         RT = inputs['camera_matrices'][1].detach() if 'camera_matrices' in inputs else None
@@ -2150,27 +2152,20 @@ class Discriminator(torch.nn.Module):
         
         # forward separate camera encoder, which can also be progressive...
         if self.camera_kwargs.camera_encoder:
-            c_nerf, _, _ = self.forward_blocks_progressive(
-                inputs['img_nerf'] if not self.camera_kwargs.camera_encoder_progressive else img, 
-                cam_enc=True, **block_kwargs)
+            c_nerf, _, _ = self.forward_blocks_progressive(img, mode='cam_enc', **block_kwargs)
             if c.size(-1) == 0:
                 c, camera_loss = c_nerf, self.get_camera_loss(RT, UV, c_nerf)
         
         # forward another dual discriminator only for low resolution images
         if self.dual_discriminator:
-            x_nerf, img_nerf = self.forward_blocks(
-                inputs['img_nerf'], alpha, False, self.lowres_head, 
-                [r for r in self.block_resolutions if r <= self.lowres_head], 'dual', **block_kwargs)            
+            x_nerf, img_nerf = self.forward_blocks_progressive(inputs['img_nerf'], mode='dual_disc', **block_kwargs)            
 
         # if applied data augmentation for discriminator
         if aug_pipe is not None:
             img = aug_pipe(img)
 
         # perform main discriminator block
-        c_disc, x, img = self.forward_blocks_progressive(
-            img, cam_enc=self.camera_kwargs.predict_camera and (not self.camera_kwargs.camera_encoder), **block_kwargs)
-                
-        # predict camera based on discriminator features
+        c_disc, x, img = self.forward_blocks_progressive(img, mode='disc', **block_kwargs)
         if (c.size(-1) == 0) and c_disc is not None:
             c, camera_loss = c_disc, self.get_camera_loss(RT, UV, c_disc)
         
