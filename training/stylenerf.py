@@ -752,9 +752,11 @@ class VolumeRenderer(object):
         di_trs = self.C.get_transformed_depth(di)
         p_i, r_i = self.C.get_evaluation_points(pixels_world, camera_world, di_trs)
         p_i = self.I.query_input_features(p_i, nerf_input_feats, fg_shape, bound)
-        pre_sigma_raw, p_i = p_i[...,:8].sum(-1, keepdim=True), p_i[..., 8:] 
+        
+        pre_sigma_raw, p_i = p_i[...,:8].sum(dim=-1, keepdim=True), p_i[..., 8:] 
         pre_sigma = self.get_density(rearrange(pre_sigma_raw, 'b (n s) () -> b n s', s=H.n_steps), 
                                      fg_nerf, training=H.training)
+        
         pre_weights = self.C.calc_volume_weights(
             pre_sigma, di if self.C.dists_normalized else di_trs, ray_vector, last_dist=1e10)[0]
         
@@ -879,7 +881,6 @@ class VolumeRenderer(object):
 
         if nerf_input_feats is not None:
             p_i = self.I.query_input_features(p_i, nerf_input_feats, fg_shape, bound)        
-        
         feat, sigma_raw = fg_nerf(p_i, r_i, z_shape_obj, z_app_obj, ws=styles, shape=fg_shape)
         feat = rearrange(feat, 'b (n s) d -> b n s d', s=H.n_steps)
         sigma_raw = rearrange(sigma_raw.squeeze(-1), 'b (n s) -> b n s', s=H.n_steps) 
@@ -1031,8 +1032,9 @@ class VolumeRenderer(object):
         
         # volume rendering options: bg_weights, bg_lambda = None, None
         if (nerf_input_feats is not None) and \
-            nerf_input_feats[0] == 'tri_plane_prod' and H.fg_inf_depth:   
-            # volume rendering with pre-computed density similar to CP-decomposition
+            len(nerf_input_feats) == 4 and \
+            nerf_input_feats[2] == 'tri_vector' and H.fg_inf_depth:   
+            # volume rendering with pre-computed density similar to tensor-decomposition
             output = self.forward_rendering_with_pre_density(
                 H, output, fg_nerf, nerf_input_cams, nerf_input_feats, latent_codes, styles)
 
@@ -1302,7 +1304,8 @@ class NeRFInput(Upsampler):
         if self.output_mode   == 'tri_plane_reshape':
             self.img_channels, in_channels, const = 3 * self.out_dim, 0, None    
         elif self.output_mode == 'tri_plane_product':   #TODO: 8-dim is for density (hard-coded for now)
-            self.img_channels, in_channels, const = 3 * (self.out_dim + 8), 0, None
+            self.img_channels, in_channels = 3 * (self.out_dim + 8), 0
+            const = torch.nn.Parameter(0.1 * torch.randn([self.img_channels, self.out_res]))
         elif self.output_mode == 'multi_planes':
             self.img_channels, in_channels, const = self.out_dim * self.split_size, 0, None
             kwargs_copy['architecture'] = 'orig'
@@ -1375,7 +1378,8 @@ class NeRFInput(Upsampler):
             if self.output_mode == 'tri_plane_reshape':
                 out = ('tri_plane', rearrange(img, 'b (s c) h w -> b s c h w', s=3))
             elif self.output_mode == 'tri_plane_product':
-                out = ('tri_plane_prod', rearrange(img, 'b (s c) h w -> b s c h w', s=3))
+                out = ('tri_plane', rearrange(img, 'b (s c) h w -> b s c h w', s=3), 
+                       'tri_vector', repeat(rearrange(blocks[-1], '(s c) d -> s c d', s=3), 's c d -> b s c d', b=img.size(0)))
             else:
                 raise NotImplementedError("remove support for other types of tri-plane implementation.")
             
@@ -1418,16 +1422,13 @@ class NeRFInput(Upsampler):
         batch_size, height, width, n_steps = p_shape        
         p_i = p_i / bound
         
-        if (input_feats[0] == 'tri_plane') or (input_feats[0] == 'tri_plane_prod'):
+        if input_feats[0] == 'tri_plane':
             # TODO!! Our world space, x->depth, y->width, z->height
             lh, lw = dividable(n_steps)
             p_ds = rearrange(p_i, 'b (h w l m) d -> b (l h) (m w) d',
                 b=batch_size, h=height, w=width, l=lh, m=lw).split(1, dim=-1)
             px, py, pz = p_ds[0], p_ds[1], p_ds[2]
-            
-            # HACK here
-            if len(input_feats) == 4:  pz = -pz
-
+                
             # project points onto three planes
             p_xy = torch.cat([px, py], -1)
             p_xz = torch.cat([px, pz], -1)
@@ -1436,7 +1437,19 @@ class NeRFInput(Upsampler):
             f_in = torch.cat([input_feats[1][:, i] for i in range(3)], 0)
             p_f  = grid_sample(f_in, p_gs)  # gradient-fix bilinear interpolation
             p_f  = [p_f[i * batch_size: (i+1) * batch_size] for i in range(3)]
-            p_f  = sum(p_f) if input_feats[0] == 'tri_plane' else p_f[0] * p_f[1] * p_f[2]  # product!
+            
+            # project points to three vectors (optional)
+            if len(input_feats) == 4 and input_feats[2] == 'tri_vector':
+                # TODO: PyTorch did not support grid_sample for 1D data. Maybe need custom code.
+                p_gs_vec = torch.cat([pz, py, px], 0)
+                f_in_vec = torch.cat([input_feats[3][:, i] for i in range(3)], 0)
+                p_f_vec  = grid_sample(f_in_vec.unsqueeze(-1), torch.cat([p_gs_vec, torch.zeros_like(p_gs_vec)], -1))
+                p_f_vec  = [p_f_vec[i * batch_size: (i+1) * batch_size] for i in range(3)]
+                
+                # multiply on the triplane features
+                p_f = [m * v for m, v in zip(p_f, p_f_vec)]
+                
+            p_f  = sum(p_f)
             p_f  = rearrange(p_f, 'b d (l h) (m w) -> b (h w l m) d', l=lh, m=lw)
         
         elif input_feats[0] == 'volume':
