@@ -23,7 +23,15 @@ pip install -r requirements.txt
 Please refer to https://github.com/NVlabs/stylegan2-ada-pytorch for additional software/hardware requirements.
 
 ## Dataset
-We follow the same dataset format as StyleGAN2-ADA supported, which can be either an image folder, or a zipped file.
+We follow the same dataset format as [StyleGAN2-ADA](https://github.com/NVlabs/stylegan2-ada-pytorch#preparing-datasets) supported, which can be either an image folder, or a zipped file.
+
+## Pretrained Checkpoints
+You can download the pre-trained checkpoints (used in our paper) and some recent variants trained with current codebase as follows:
+| Dataset   | Resolution | #Params(M) | Config |                           Download                           |
+| :-------- | :--------: | :--------: | :----: | :----------------------------------------------------------: |
+| FFHQ      |    512     | 148        | Default |  [Hugging Face 🤗](https://huggingface.co/thomagram/stylenerf-ffhq-config-basic/blob/main/ffhq_512.pkl) |
+
+（I am slowly adding more checkpoints. Thanks for your very kind patience!)
 
 
 ## Train a new StyleNeRF model
