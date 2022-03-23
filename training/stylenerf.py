@@ -764,57 +764,6 @@ class VolumeRenderer(object):
         feat = rearrange(feat, 'b (n s) d -> b n s d', s=H.n_steps)
         feat = torch.sum(pre_weights.unsqueeze(-1) * feat, dim=-2)
         
-        """
-        # query the density grids and compute the mask and indices
-        pre_sigma_raw = self.I.query_input_features(p_i, ('volume', nerf_input_feats[3]), fg_shape, bound) 
-        pre_sigma     = self.get_density(rearrange(pre_sigma_raw, 'b (n s) () -> b n s', s=H.n_steps), fg_nerf, training=H.training)
-        pre_weights   = self.C.calc_volume_weights(pre_sigma, di if self.C.dists_normalized else di_trs, ray_vector, last_dist=1e10)[0]
-        pre_p_target  = 1.0  if H.alpha <= 0 else 1.0 - (1.0 - self.density_p_target) * H.alpha 
-        
-        if pre_p_target < 1:  # use density grid to prune samples
-            pre_topp_mask = rearrange(topp_masking(pre_weights, pre_p_target), 'b n s -> b (n s)')
-            pre_topp_asgn = repeat(torch.arange(H.n_points * H.batch_size, device=p_i.device), 
-                '(b n) -> b (n s)', b=H.batch_size, n=H.n_points, s=H.n_steps)[pre_topp_mask]
-            pre_topp_lens = pre_topp_mask.sum(-1).cpu().tolist()
-            pre_weights   = rearrange(pre_weights, 'b n s -> b (n s)')
-            pre_topp_wgts = pre_weights[pre_topp_mask]
-            pre_topp_maxl = int(np.ceil(max(pre_topp_lens) / 512) * 512)  # just for convinenet
-            pre_topp_asg2 = torch.cat([
-                torch.arange(pre_topp_lens[b], device=p_i.device) + 
-                pre_topp_maxl * b for b in range(H.batch_size)])
-            
-            # prune the samples based on masks, move to 2D for style-based generation
-            filtered_pi   = p_i[pre_topp_mask]
-            filtered_pi_b = torch.scatter(
-                filtered_pi.new_zeros(H.batch_size * pre_topp_maxl, 3), 0,
-                repeat(pre_topp_asg2, 'n -> n s', s=3), filtered_pi).reshape(H.batch_size, -1, 3)
-            fg_shape = [H.batch_size, pre_topp_maxl // 512, 512, 1]
-            
-            # forward nerf (with tri-plane features) with pruned points
-            filtered_pi_b   = self.I.query_input_features(filtered_pi_b, nerf_input_feats, fg_shape, bound)
-            filtered_feat_b = fg_nerf(filtered_pi_b, r_i, z_shape_obj, z_app_obj, ws=styles, shape=fg_shape, impl='mlp')[0]
-
-            # get back to 1D
-            filtered_feat = torch.gather(filtered_feat_b.reshape(H.batch_size * pre_topp_maxl, -1), 0, 
-                repeat(pre_topp_asg2, 'n -> n s', s=filtered_feat_b.size(-1)))
-            feat = torch.scatter_add(
-                filtered_feat.new_zeros(H.batch_size * H.n_points, filtered_feat.size(-1)), 0, 
-                repeat(pre_topp_asgn, 'n -> n d', d=filtered_feat.size(-1)),
-                filtered_feat * pre_topp_wgts[:, None]).reshape(H.batch_size, H.n_points, -1)
-            pre_weights_before = pre_weights.reshape(H.batch_size, -1, H.n_steps)
-            pre_weights = torch.zeros_like(pre_weights).masked_scatter(
-                pre_topp_mask, pre_topp_wgts).reshape(H.batch_size, -1, H.n_steps)
-            
-            # balancing and pass gradients?
-            feat = feat / pre_weights.sum(dim=-1, keepdim=True) *  pre_weights_before.sum(dim=-1, keepdim=True)
-            
-        else:  
-            # normal NeRF forward, no pruning.
-            p_i  = self.I.query_input_features(p_i, nerf_input_feats, fg_shape, bound)
-            feat = fg_nerf(p_i, r_i, z_shape_obj, z_app_obj, ws=styles, shape=fg_shape)[0]
-            feat = rearrange(feat, 'b (n s) d -> b n s d', s=H.n_steps)
-            feat = torch.sum(pre_weights.unsqueeze(-1) * feat, dim=-2)
-        """
         output.feat += [feat]
         output.fg_weights = pre_weights
         output.fg_depths  = (di, di_trs)  
@@ -1737,43 +1686,15 @@ class NeRFSynthesisNetwork(torch.nn.Module):
         # save ws for potential usage.
         block_kwargs['ws_detach'] = ws.detach()
 
-        # cameras, background codes        
+        # cameras, background codes
         if "camera_matrices" not in block_kwargs:
-            if 'camera_mode' in block_kwargs:
-                block_kwargs["camera_matrices"] = self.get_camera(batch_size, device=ws.device, mode=block_kwargs["camera_mode"])
-            else:
-                if self.predict_camera:
-                    rand_mode = ws.new_zeros(ws.size(0), 2)
-                    if self.C.gaussian_camera:
-                        rand_mode = rand_mode.normal_()
-                        pred_mode = self.camera_generator(rand_mode)
-                    else:
-                        rand_mode = rand_mode.uniform_()
-                        pred_mode = self.camera_generator(rand_mode - 0.5)
-                    mode = rand_mode if self.alpha <= 0 else rand_mode + pred_mode * 0.1
-                    block_kwargs["camera_matrices"] = self.get_camera(batch_size, device=ws.device, mode=mode)
-                else:   
-                    block_kwargs["camera_matrices"] = self.get_camera(batch_size, device=ws.device)
-            
-            if ('camera_RT' in block_kwargs) or ('camera_UV' in block_kwargs):
-                camera_matrices = list(block_kwargs["camera_matrices"])
-                camera_mask = torch.rand(batch_size).type_as(camera_matrices[1]).lt(self.alpha)
-                if 'camera_RT' in block_kwargs:
-                    image_RT = block_kwargs['camera_RT'].reshape(-1, 4, 4)
-                    camera_matrices[1][camera_mask] = image_RT[camera_mask]  # replacing with inferred cameras
-                else:  # sample uv instead of sampling the extrinsic matrix
-                    image_UV = block_kwargs['camera_UV']
-                    image_RT = self.get_camera(batch_size, device=ws.device, mode=image_UV, force_uniform=True)[1]           
-                    camera_matrices[1][camera_mask] = image_RT[camera_mask]  # replacing with inferred cameras
-                    camera_matrices[2][camera_mask] = image_UV[camera_mask]  # replacing with inferred uvs
-                block_kwargs["camera_matrices"] = tuple(camera_matrices)
-
-        if "latent_codes" not in block_kwargs:
-            block_kwargs["latent_codes"] = self.get_latent_codes(batch_size, device=ws.device)
-
-        # deal with roll in cameras
+            block_kwargs['camera_matrices'] = self.get_camera(batch_size, ws, block_kwargs)
         block_kwargs['theta'] = self.C.get_roll(ws, self.training, **block_kwargs)
         
+        # get latent codes instead of style vectors (used in GRAF & GIRAFFE)
+        if "latent_codes" not in block_kwargs:
+            block_kwargs["latent_codes"] = self.get_latent_codes(batch_size, device=ws.device)
+         
         # generate features for input points (Optional, default not use)
         with torch.autograd.profiler.record_function('nerf_input_feats'):
             if self.I is not None:
@@ -1950,8 +1871,38 @@ class NeRFSynthesisNetwork(torch.nn.Module):
         z_app_bg = sample_z(batch_size, z_dim_bg) if not self.V.no_background else None
         return z_shape_obj, z_app_obj, z_shape_bg, z_app_bg
 
-    def get_camera(self, *args, **kwargs):
-        return self.C.get_camera(*args, **kwargs)   # for compatibility
+    def get_camera(self, batch_size, ws, block_kwargs):
+        if 'camera_mode' in block_kwargs:
+            camera_matrices = self.C.get_camera(batch_size, device=ws.device, mode=block_kwargs["camera_mode"])
+        
+        else:
+            if self.predict_camera:
+                rand_mode = ws.new_zeros(ws.size(0), 2)
+                if self.C.gaussian_camera:
+                    rand_mode = rand_mode.normal_()
+                    pred_mode = self.camera_generator(rand_mode)
+                else:
+                    rand_mode = rand_mode.uniform_()
+                    pred_mode = self.camera_generator(rand_mode - 0.5)
+                mode = rand_mode if self.alpha <= 0 else rand_mode + pred_mode * 0.1
+                camera_matrices = self.C.get_camera(batch_size, device=ws.device, mode=mode)
+            
+            else:   
+                camera_matrices = self.C.get_camera(batch_size, device=ws.device)
+        
+        if ('camera_RT' in block_kwargs) or ('camera_UV' in block_kwargs):
+            camera_matrices = list(camera_matrices)
+            camera_mask = torch.rand(batch_size).type_as(camera_matrices[1]).lt(self.alpha)
+            if 'camera_RT' in block_kwargs:
+                image_RT = block_kwargs['camera_RT'].reshape(-1, 4, 4)
+                camera_matrices[1][camera_mask] = image_RT[camera_mask]  # replacing with inferred cameras
+            else:  # sample uv instead of sampling the extrinsic matrix
+                image_UV = block_kwargs['camera_UV']
+                image_RT = self.get_camera(batch_size, device=ws.device, mode=image_UV, force_uniform=True)[1]           
+                camera_matrices[1][camera_mask] = image_RT[camera_mask]  # replacing with inferred cameras
+                camera_matrices[2][camera_mask] = image_UV[camera_mask]  # replacing with inferred uvs
+            camera_matrices = tuple(camera_matrices)
+        return camera_matrices
 
 
 @persistence.persistent_class
@@ -2199,7 +2150,7 @@ class Discriminator(torch.nn.Module):
         out_disc, x, img = self.forward_blocks_progressive(img, mode='disc', **block_kwargs)
         if no_condition and ('cam' in out_disc):
             c, camera_loss = out_disc['cam'], self.get_camera_loss(RT, UV, out_disc['cam'])
-            if 'styles' in out_camenc:
+            if 'styles' in out_disc:
                 w, styles_loss = out_disc['styles'], self.get_styles_loss(WS, out_disc['styles'])
             no_condition = False
         
