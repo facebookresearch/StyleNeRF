@@ -168,6 +168,8 @@ def training_loop(
         common_kwargs['img_channels'] = G_kwargs['img_channels']
         del G_kwargs['img_channels']
     G = dnnlib.util.construct_class_by_name(**G_kwargs, **common_kwargs).train().requires_grad_(False).to(device) # subclass of torch.nn.Module
+    if 'camera_kwargs' in D_kwargs:
+        D_kwargs.camera_kwargs.w_dim, D_kwargs.camera_kwargs.num_ws = G.w_dim, G.num_ws
     D = dnnlib.util.construct_class_by_name(**D_kwargs, **common_kwargs).train().requires_grad_(False).to(device) # subclass of torch.nn.Module
     G_ema = copy.deepcopy(G).eval()
     

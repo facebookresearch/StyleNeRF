@@ -1255,9 +1255,11 @@ class DiscriminatorEpilogue(torch.nn.Module):
 
         # Conditioning.
         if self.cmap_dim > 0:
-            misc.assert_shape(cmap, [None, self.cmap_dim])
-            x = (x * cmap).sum(dim=1, keepdim=True) * (1 / np.sqrt(self.cmap_dim))
-
+            if not isinstance(cmap, list):
+                cmap = [cmap]   # in case of multiple conditions. a trick (TODO)
+            x = [(x * c).sum(dim=1, keepdim=True) * (1 / np.sqrt(self.cmap_dim)) for c in cmap]
+            x = sum(x) / len(cmap)
+            
         assert x.dtype == dtype
         return x
 
