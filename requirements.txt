@@ -3,7 +3,7 @@ click==8.0.3
 clip-by-openai==1.1
 einops==0.3.0
 glfw==2.5.0
-gradio==2.3.9
+gradio==2.8.13
 imageio==2.9.0
 imgui==1.4.1
 kornia==0.5.10

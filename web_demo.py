@@ -1,5 +1,6 @@
 # Copyright (c) Facebook, Inc. and its affiliates. All Rights Reserved
-
+import os, sys
+os.system('pip install -r requirements.txt')
 
 import gradio as gr
 import numpy as np
@@ -8,14 +9,28 @@ import time
 import legacy
 import torch
 import glob
-import os, sys
+
 import cv2
+import signal
 from torch_utils import misc
 from renderer import Renderer
 from training.networks import Generator
+from huggingface_hub import hf_hub_download
+
 
 device = torch.device('cuda')
 port   = int(sys.argv[1]) if len(sys.argv) > 1 else 21111
+
+
+
+def handler(signum, frame):
+    res = input("Ctrl-c was pressed. Do you really want to exit? y/n ")
+    if res == 'y':
+        gr.close_all()
+        exit(1)
+ 
+signal.signal(signal.SIGINT, handler)
+
 
 def set_random_seed(seed):
     torch.manual_seed(seed)
@@ -40,17 +55,19 @@ def get_camera_traj(model, pitch, yaw, fov=12, batch_size=1, model_name='FFHQ512
 def check_name(model_name='FFHQ512'):
     """Gets model by name."""
     if model_name == 'FFHQ512':
-        network_pkl = "./pretrained/ffhq_512.pkl"
-    elif model_name == 'FFHQ512v2':
-        network_pkl = "./pretrained/ffhq_512_eg3d.pkl"
-    elif model_name == 'AFHQ512':
-        network_pkl = "./pretrained/afhq_512.pkl"
-    elif model_name == 'MetFaces512':
-        network_pkl = "./pretrained/metfaces_512.pkl"
-    elif model_name == 'CompCars256':
-        network_pkl = "./pretrained/cars_256.pkl"
-    elif model_name == 'FFHQ1024':
-        network_pkl = "./pretrained/ffhq_1024.pkl"
+        network_pkl = hf_hub_download(repo_id='thomagram/stylenerf-ffhq-config-basic', filename='ffhq_512.pkl')
+    
+    # TODO: checkpoint to be updated!
+    # elif model_name == 'FFHQ512v2':
+    #     network_pkl = "./pretrained/ffhq_512_eg3d.pkl"
+    # elif model_name == 'AFHQ512':
+    #     network_pkl = "./pretrained/afhq_512.pkl"
+    # elif model_name == 'MetFaces512':
+    #     network_pkl = "./pretrained/metfaces_512.pkl"
+    # elif model_name == 'CompCars256':
+    #     network_pkl = "./pretrained/cars_256.pkl"
+    # elif model_name == 'FFHQ1024':
+    #     network_pkl = "./pretrained/ffhq_1024.pkl"
     else:
         if os.path.isdir(model_name):
             network_pkl = sorted(glob.glob(model_name + '/*.pkl'))[-1]
@@ -89,13 +106,13 @@ def proc_seed(history, seed):
         seed = int(seed)
 
 
-def f_synthesis(model_name, model_find, render_option, trunc, seed1, seed2, mix1, mix2, yaw, pitch, roll, fov):
-    history = gr.get_state() or {}
+def f_synthesis(model_name, model_find, render_option, early, trunc, seed1, seed2, mix1, mix2, yaw, pitch, roll, fov, history):
+    history = history or {}
     seeds = []
     
     if model_find != "":
         model_name = model_find
-
+        
     model_name = check_name(model_name)
     if model_name != history.get("model_name", None):
         model, res, imgs = get_model(model_name, render_option)
@@ -134,7 +151,7 @@ def f_synthesis(model_name, model_find, render_option, trunc, seed1, seed2, mix1
         history[f'seed{idx}'] = seed
     history['trunc'] = trunc
     history['model_name'] = model_name
-    gr.set_state(history)
+    
     set_random_seed(sum(seeds))
 
     # style mixing (?)
@@ -142,7 +159,13 @@ def f_synthesis(model_name, model_find, render_option, trunc, seed1, seed2, mix1
     ws = ws1.clone()
     ws[:, :8] = ws1[:, :8] * mix1 + ws2[:, :8] * (1 - mix1)
     ws[:, 8:] = ws1[:, 8:] * mix2 + ws2[:, 8:] * (1 - mix2)
-
+    
+    # set visualization for other types of inputs.
+    if early == 'Normal Map':
+        render_option += ',normal,early'
+    elif early == 'Gradient Map':
+        render_option += ',gradient,early'
+    
     start_t = time.time()
     with torch.no_grad():
         cam = get_camera_traj(model, pitch, yaw, fov, model_name=model_name)
@@ -163,25 +186,28 @@ def f_synthesis(model_name, model_find, render_option, trunc, seed1, seed2, mix1
         image = np.concatenate([cv2.resize(imgs, (b, a), cv2.INTER_AREA), image], 1)
   
     print(f'rendering time = {end_t-start_t:.4f}s')
-    return (image * 255).astype('uint8')
+    image = (image * 255).astype('uint8')
+    return image, history
 
-model_name = gr.inputs.Dropdown(['FFHQ512', 'FFHQ512v2', 'AFHQ512', 'MetFaces512', 'CompCars256', 'FFHQ1024'])
+model_name = gr.inputs.Dropdown(['FFHQ512'])  #  'FFHQ512v2', 'AFHQ512', 'MetFaces512', 'CompCars256', 'FFHQ1024'
 model_find = gr.inputs.Textbox(label="checkpoint path", default="")
-render_option = gr.inputs.Textbox(label="rendering options", default='freeze_bg,steps:40')
+render_option = gr.inputs.Textbox(label="rendering options", default='steps:40')
 trunc  = gr.inputs.Slider(default=0.7, maximum=1.0, minimum=0.0, label='truncation trick')
 seed1  = gr.inputs.Number(default=1, label="seed1")
 seed2  = gr.inputs.Number(default=9, label="seed2")
 mix1   = gr.inputs.Slider(minimum=0, maximum=1, default=0, label="linear mixing ratio (geometry)")
 mix2   = gr.inputs.Slider(minimum=0, maximum=1, default=0, label="linear mixing ratio (apparence)")
+early  = gr.inputs.Radio(['None', 'Normal Map', 'Gradient Map'], default='None', label='intermedia output')
 yaw    = gr.inputs.Slider(minimum=-1, maximum=1, default=0, label="yaw")
 pitch  = gr.inputs.Slider(minimum=-1, maximum=1, default=0, label="pitch")
 roll   = gr.inputs.Slider(minimum=-1, maximum=1, default=0, label="roll (optional, not suggested)")
 fov    = gr.inputs.Slider(minimum=9, maximum=15, default=12, label="fov")
 css = ".output_image {height: 40rem !important; width: 100% !important;}"
+
 gr.Interface(fn=f_synthesis,
-             inputs=[model_name, model_find, render_option, trunc, seed1, seed2, mix1, mix2, yaw, pitch, roll, fov],
-             outputs="image",
+             inputs=[model_name, model_find, render_option, early, trunc, seed1, seed2, mix1, mix2, yaw, pitch, roll, fov, "state"],
+             title="Interctive Web Demo for StyleNeRF (ICLR 2022)",
+             outputs=["image", "state"],
              layout='unaligned',
-             css=css,
-             live=True,
-             server_port=port).launch()
+             css=css, theme='dark-huggingface',
+             live=True).launch(server_port=port)

@@ -1530,6 +1530,7 @@ class NeRFSynthesisNetwork(torch.nn.Module):
         # others (regularization)
         regularization    = [],     # nv_beta, nv_vol 
         predict_camera    = False,
+        camera_condition  = None,
         n_reg_samples     = 0,
         reg_full          = False,
         
@@ -1595,7 +1596,10 @@ class NeRFSynthesisNetwork(torch.nn.Module):
         self.predict_camera = predict_camera
         if predict_camera:  # encoder side camera predictor (not very useful)
             self.camera_generator = CameraGenerator()
-
+        self.camera_condition = camera_condition
+        if self.camera_condition is not None:   # style vector modulated by the camera poses (uv)
+            self.camera_map = MappingNetwork(z_dim=0, c_dim=16, w_dim=self.w_dim, num_ws=None, w_avg_beta=None, num_layers=2)
+            
         # ray level choices
         self.regularization   = regularization
         self.margin           = block_kwargs.get('margin', 0)
@@ -1687,14 +1691,24 @@ class NeRFSynthesisNetwork(torch.nn.Module):
         block_kwargs['ws_detach'] = ws.detach()
 
         # cameras, background codes
+        if self.camera_condition is not None:
+            cam_cond = self.get_camera_samples(batch_size, ws, block_kwargs, gen_cond=True)
+        
         if "camera_matrices" not in block_kwargs:
-            block_kwargs['camera_matrices'] = self.get_camera(batch_size, ws, block_kwargs)
+            block_kwargs['camera_matrices'] = self.get_camera_samples(batch_size, ws, block_kwargs)
+        if (self.camera_condition is not None) and (cam_cond is None):
+            cam_cond = block_kwargs['camera_matrices']
+           
         block_kwargs['theta'] = self.C.get_roll(ws, self.training, **block_kwargs)
         
         # get latent codes instead of style vectors (used in GRAF & GIRAFFE)
         if "latent_codes" not in block_kwargs:
             block_kwargs["latent_codes"] = self.get_latent_codes(batch_size, device=ws.device)
-         
+    
+        if (self.camera_condition is not None) and (self.camera_condition == 'full'):
+            cam_cond = normalize_2nd_moment(self.camera_map(None, cam_cond[1].reshape(-1, 16)))
+            ws = ws * cam_cond[:, None, :]     
+    
         # generate features for input points (Optional, default not use)
         with torch.autograd.profiler.record_function('nerf_input_feats'):
             if self.I is not None:
@@ -1785,7 +1799,10 @@ class NeRFSynthesisNetwork(torch.nn.Module):
         # Use 2D upsampler
         if (cur_resolution > self.resolution_vol) or self.progressive_nerf_only:
             imgs += [img]
-
+            if (self.camera_condition is not None) and (self.camera_condition != 'full'):
+                cam_cond = normalize_2nd_moment(self.camera_map(None, cam_cond[1].reshape(-1, 16)))
+                ws = ws * cam_cond[:, None, :] 
+            
             # 2D feature map upsampling
             with torch.autograd.profiler.record_function('upsampling'):
                 ws       = ws.to(torch.float32)
@@ -1871,9 +1888,20 @@ class NeRFSynthesisNetwork(torch.nn.Module):
         z_app_bg = sample_z(batch_size, z_dim_bg) if not self.V.no_background else None
         return z_shape_obj, z_app_obj, z_shape_bg, z_app_bg
 
-    def get_camera(self, batch_size, ws, block_kwargs):
-        if 'camera_mode' in block_kwargs:
-            camera_matrices = self.C.get_camera(batch_size, device=ws.device, mode=block_kwargs["camera_mode"])
+    def get_camera(self, *args, **kwargs):   # for compitability
+        return self.C.get_camera(*args, **kwargs)
+    
+    def get_camera_samples(self, batch_size, ws, block_kwargs, gen_cond=False):
+        if gen_cond:  # camera condition for generator (? a special variant)
+            if ('camera_matrices' in block_kwargs) and (not self.training):  # this is for rendering
+                camera_matrices = self.get_camera(batch_size, device=ws.device, mode=[0.5, 0.5, 0.5])
+            elif self.training and (np.random.rand() > 0.5):
+                camera_matrices = self.get_camera(batch_size, device=ws.device)
+            else:
+                camera_matrices = None
+        
+        elif 'camera_mode' in block_kwargs:
+            camera_matrices = self.get_camera(batch_size, device=ws.device, mode=block_kwargs["camera_mode"])    
         
         else:
             if self.predict_camera:
@@ -1885,10 +1913,10 @@ class NeRFSynthesisNetwork(torch.nn.Module):
                     rand_mode = rand_mode.uniform_()
                     pred_mode = self.camera_generator(rand_mode - 0.5)
                 mode = rand_mode if self.alpha <= 0 else rand_mode + pred_mode * 0.1
-                camera_matrices = self.C.get_camera(batch_size, device=ws.device, mode=mode)
+                camera_matrices = self.get_camera(batch_size, device=ws.device, mode=mode)
             
             else:   
-                camera_matrices = self.C.get_camera(batch_size, device=ws.device)
+                camera_matrices = self.get_camera(batch_size, device=ws.device)
         
         if ('camera_RT' in block_kwargs) or ('camera_UV' in block_kwargs):
             camera_matrices = list(camera_matrices)
