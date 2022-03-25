@@ -4,7 +4,7 @@
 
 **StyleNeRF: A Style-based 3D-Aware Generator for High-resolution Image Synthesis**<br>
 Jiatao Gu, Lingjie Liu, Peng Wang, Christian Theobalt<br>
-### [Project Page](http://jiataogu.me/style_nerf) | [Video](http://jiataogu.me/style_nerf) | [Paper](https://arxiv.org/abs/2110.08985) | [Data](#dataset)<br>
+### [Project Page](http://jiataogu.me/style_nerf) | [Video](http://jiataogu.me/style_nerf) | [Demo](https://huggingface.co/spaces/facebook/StyleNeRF) | [Paper](https://arxiv.org/abs/2110.08985) | [Data](#dataset)<br>
 
 Abstract: *We propose StyleNeRF, a 3D-aware generative model for photo-realistic high-resolution image synthesis with high multi-view consistency, which can be trained on unstructured 2D images. Existing approaches either cannot synthesize high-resolution images with fine details or yield noticeable 3D-inconsistent artifacts. In addition, many of them lack control over style attributes and explicit 3D camera poses. StyleNeRF integrates the neural radiance field (NeRF) into a style-based generator to tackle the aforementioned challenges, i.e., improving rendering efficiency and 3D consistency for high-resolution image generation. We perform volume rendering only to produce a low-resolution feature map and progressively apply upsampling in 2D to address the first issue. To mitigate the inconsistencies caused by 2D upsampling, we propose multiple designs, including a better upsampler and a new regularization loss. With these designs, StyleNeRF can synthesize high-resolution images at interactive rates while preserving 3D consistency at high quality. StyleNeRF also enables control of camera poses and different levels of styles, which can generalize to unseen views. It also supports challenging tasks, including zoom-in and-out, style mixing, inversion, and semantic editing.*
 
@@ -29,7 +29,9 @@ We follow the same dataset format as [StyleGAN2-ADA](https://github.com/NVlabs/s
 You can download the pre-trained checkpoints (used in our paper) and some recent variants trained with current codebase as follows:
 | Dataset   | Resolution | #Params(M) | Config |                           Download                           |
 | :-------- | :--------: | :--------: | :----: | :----------------------------------------------------------: |
-| FFHQ      |    512     | 148        | Default |  [Hugging Face 🤗](https://huggingface.co/thomagram/stylenerf-ffhq-config-basic/blob/main/ffhq_512.pkl) |
+| FFHQ      |    256     | 128        | Default |  [Hugging Face 🤗](https://huggingface.co/facebook/stylenerf-ffhq-config-basic/blob/main/ffhq_256.pkl) |
+| FFHQ      |    512     | 148        | Default |  [Hugging Face 🤗](https://huggingface.co/facebook/stylenerf-ffhq-config-basic/blob/main/ffhq_512.pkl) |
+| FFHQ      |    1024    | 184        | Default |  [Hugging Face 🤗](https://huggingface.co/facebook/stylenerf-ffhq-config-basic/blob/main/ffhq_1024.pkl) |
 
 （I am slowly adding more checkpoints. Thanks for your very kind patience!)
 
@@ -53,6 +55,10 @@ It supports different rotation trajectories for rendering new videos.
 python web_demo.py 21111
 ```
 It will in default run a Gradio-powered demo on https://localhost:21111
+
+[NEW]
+The demo is also integrated into [Huggingface Spaces 🤗](https://huggingface.co/spaces) using [Gradio](https://github.com/gradio-app/gradio). Try out the Web Demo: [![Hugging Face Spaces](https://img.shields.io/badge/%F0%9F%A4%97%20Hugging%20Face-Spaces-blue)](https://huggingface.co/spaces/facebook/StyleNeRF)
+
 ![Web demo](./docs/web_demo.gif)
 ## Run a GUI visualizer
 ```bash
