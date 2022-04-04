@@ -1828,7 +1828,6 @@ class NeRFSynthesisNetwork(torch.nn.Module):
 
             with torch.autograd.profiler.record_function('nerf_path_reg_loss'):
                 if len(rand_imgs) > 0: # and self.training:  # random pixel regularization??            
-                    assert self.progressive_growing
                     if self.reg_full:     # aggregate RGB in the end.
                         lh, lw = img_rand.size(2) // self.n_reg_samples, img_rand.size(3) // self.n_reg_samples
                         img_rand = rearrange(img_rand, 'b d (l h) (m w) -> b d (l m) h w', l=lh, m=lw)
@@ -1947,6 +1946,7 @@ class Discriminator(torch.nn.Module):
         cmap_dim            = None,     # Dimensionality of mapped conditioning label, None = default.
         lowres_head         = None,     # add a low-resolution discriminator head
         dual_discriminator  = False,    # add low-resolution (NeRF) image 
+        dual_input          = False,    # add low-resolution (NeRF) image directly on the input.
         
         block_kwargs        = {},       # Arguments for DiscriminatorBlock.
         mapping_kwargs      = {},       # Arguments for MappingNetwork.
@@ -1970,6 +1970,7 @@ class Discriminator(torch.nn.Module):
         self.lowres_head         = lowres_head
 
         self.dual_discriminator  = dual_discriminator
+        self.dual_input          = dual_input
         self.upsample_type       = upsample_type
         self.progressive         = progressive
         self.resize_real_early   = resize_real_early
@@ -1977,6 +1978,9 @@ class Discriminator(torch.nn.Module):
         
         if self.progressive:
             assert self.architecture == 'skip', "not supporting other types for now."
+        if self.dual_input:
+            self.img_channels = self.img_channels * 2
+        assert not (self.dual_discriminator and self.dual_input), "dual disc or input are conflict"
 
         channel_base = int(channel_base * 32768)
         channels_dict = {res: min(channel_base // res, channel_max) for res in self.block_resolutions + [4]}
@@ -2143,14 +2147,16 @@ class Discriminator(torch.nn.Module):
         if not isinstance(inputs, dict):
             inputs = {'img': inputs}
         img = inputs['img']
-        
+
         # this is to handle real images
         block_resolutions, alpha, _ = self.get_block_resolutions(img)
         if img.size(-1) > block_resolutions[0]:
             img = downsample(img, block_resolutions[0])
-        if self.dual_discriminator and ('img_nerf' not in inputs):
+        if (self.dual_discriminator or self.dual_input) and ('img_nerf' not in inputs):
             inputs['img_nerf'] = downsample(img, self.lowres_head)  
-   
+        if self.dual_input:
+            img = torch.cat([img, upsample(inputs['img_nerf'], img.size(-1))], 1)
+            
         RT = inputs['camera_matrices'][1].detach() if 'camera_matrices' in inputs else None
         UV = inputs['camera_matrices'][2].detach() if 'camera_matrices' in inputs else None
         WS = inputs['ws_detach'].reshape(inputs['batch_size'], -1) if 'ws_detach' in inputs else None
