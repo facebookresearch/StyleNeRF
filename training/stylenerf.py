@@ -1946,6 +1946,7 @@ class Discriminator(torch.nn.Module):
         cmap_dim            = None,     # Dimensionality of mapped conditioning label, None = default.
         lowres_head         = None,     # add a low-resolution discriminator head
         dual_discriminator  = False,    # add low-resolution (NeRF) image 
+        stop_dual_disc_at   = None,     # stop using dual discriminator after certain steps
         dual_input          = False,    # add low-resolution (NeRF) image directly on the input.
         
         block_kwargs        = {},       # Arguments for DiscriminatorBlock.
@@ -2057,6 +2058,10 @@ class Discriminator(torch.nn.Module):
         # final output module
         self.b4 = DiscriminatorEpilogue(channels_dict[4], cmap_dim=cmap_dim, resolution=4, **epilogue_kwargs, **common_kwargs)
         self.register_buffer("alpha", torch.scalar_tensor(-1))
+        
+        self.stop_dual_disc_at = stop_dual_disc_at
+        if stop_dual_disc_at is not None:  # also tracking the steps            
+            self.register_buffer("steps", torch.scalar_tensor(0))
 
     def set_alpha(self, alpha):
         if alpha is not None:
@@ -2064,7 +2069,11 @@ class Discriminator(torch.nn.Module):
     
     def set_resolution(self, res):
         self.curr_status = res
-        
+    
+    def set_steps(self, steps):
+        if hasattr(self, 'steps'):
+            self.steps.fill_(steps / 1e3)
+    
     def forward_blocks_progressive(self, img, mode="disc", **block_kwargs):
         # mode from ['disc', 'dual_disc', 'cam_enc']
         if isinstance(img, dict):
@@ -2173,9 +2182,12 @@ class Discriminator(torch.nn.Module):
                 no_condition = False
         
         # forward another dual discriminator only for low resolution images
-        if self.dual_discriminator:
-            _, x_nerf, img_nerf = self.forward_blocks_progressive(inputs['img_nerf'], mode='dual_disc', **block_kwargs)            
-
+        if self.dual_discriminator and (
+            self.stop_dual_disc_at is None or self.steps < self.stop_dual_disc_at):
+            _, x_nerf, img_nerf = self.forward_blocks_progressive(inputs['img_nerf'], mode='dual_disc', **block_kwargs)
+        else:
+            x_nerf = img_nerf = None      
+        
         # if applied data augmentation for discriminator
         if aug_pipe is not None:
             img = aug_pipe(img)
@@ -2198,7 +2210,7 @@ class Discriminator(torch.nn.Module):
                 cmap = [cmap] + [self.mapping_styles(None, ww)]
                     
         logits  = self.b4(x, img, cmap)
-        if self.dual_discriminator:
+        if x_nerf is not None and img_nerf is not None:
             logits = torch.cat([logits, self.b4(x_nerf, img_nerf, cmap)], 0)
                 
         outputs = {'logits': logits}
