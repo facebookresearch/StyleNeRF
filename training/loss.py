@@ -31,17 +31,14 @@ class Loss:
 class StyleGAN2Loss(Loss):
     def __init__(
         self, device, G_mapping, G_synthesis, D, 
-        G_encoder=None, augment_pipe=None, D_ema=None,
+        augment_pipe=None, D_ema=None,
         style_mixing_prob=0.9, r1_gamma=10, 
         pl_batch_shrink=2, pl_decay=0.01, pl_weight=2, other_weights=None,
-        curriculum=None, alpha_start=0.0, cycle_consistency=False, label_smooth=0,
-        generator_mode='random_z_random_c'):
-
+        curriculum=None, alpha_start=0.0, cycle_consistency=False, label_smooth=0):
         super().__init__()
         self.device            = device
         self.G_mapping         = G_mapping
         self.G_synthesis       = G_synthesis
-        self.G_encoder         = G_encoder
         self.D                 = D
         self.D_ema             = D_ema
         self.augment_pipe      = augment_pipe
@@ -57,23 +54,15 @@ class StyleGAN2Loss(Loss):
         self.alpha             = None
         self.cycle_consistency = cycle_consistency
         self.label_smooth      = label_smooth
-        self.generator_mode    = generator_mode
-
-        if self.G_encoder is not None:
-            import lpips
-            self.lpips_loss      = lpips.LPIPS(net='vgg').to(device=device)
 
     def set_alpha(self, steps):
         alpha = None
         if self.curriculum is not None:
-            if self.curriculum == 'upsample':
-                alpha = 0.0
-            else:
-                assert len(self.curriculum) == 2, "currently support one stage for now"
-                start, end = self.curriculum
-                alpha = min(1., max(0., (steps / 1e3 - start) / (end - start)))
-                if self.alpha_start > 0:
-                    alpha = self.alpha_start + (1 - self.alpha_start) * alpha
+            assert len(self.curriculum) == 2, "currently support one stage for now"
+            start, end = self.curriculum
+            alpha = min(1., max(0., (steps / 1e3 - start) / (end - start)))
+            if self.alpha_start > 0:
+                alpha = self.alpha_start + (1 - self.alpha_start) * alpha
         self.alpha = alpha
         self.steps = steps
         self.curr_status = None
@@ -89,48 +78,17 @@ class StyleGAN2Loss(Loss):
         self.G_synthesis.apply(_apply)
         self.curr_status = self.resolution
         self.D.apply(_apply)
-        if self.G_encoder is not None:
-            self.G_encoder.apply(_apply)
 
-    def run_G(self, z, c, sync, img=None, mode=None, get_loss=True):
-        synthesis_kwargs = {'camera_mode': 'random'}
-        generator_mode   = self.generator_mode if mode is None else mode
-
-        if (generator_mode == 'image_z_random_c') or (generator_mode == 'image_z_image_c'):
-            assert (self.G_encoder is not None) and (img is not None)
-            with misc.ddp_sync(self.G_encoder, sync):
-                ws  = self.G_encoder(img)['ws']
-            if generator_mode == 'image_z_image_c':
-                with misc.ddp_sync(self.D, False):
-                    synthesis_kwargs['camera_RT'] = misc.get_func(self.D, 'get_estimated_camera')[0](img)
-            with misc.ddp_sync(self.G_synthesis, sync):
-                out = self.G_synthesis(ws, **synthesis_kwargs)            
-            if get_loss:  # consistency loss given the image predicted camera (train the image encoder jointly)
-                out['consist_l1_loss']    = F.smooth_l1_loss(out['img'], img['img']) * 2.0   # TODO: DEBUG
-                out['consist_lpips_loss'] = self.lpips_loss(out['img'],  img['img']) * 10.0  # TODO: DEBUG
-            
-        elif (generator_mode == 'random_z_random_c') or (generator_mode == 'random_z_image_c'):
-            with misc.ddp_sync(self.G_mapping, sync):
-                ws  = self.G_mapping(z, c)
-                if self.style_mixing_prob > 0:
-                    with torch.autograd.profiler.record_function('style_mixing'):
-                        cutoff = torch.empty([], dtype=torch.int64, device=ws.device).random_(1, ws.shape[1])
-                        cutoff = torch.where(torch.rand([], device=ws.device) < self.style_mixing_prob, cutoff, torch.full_like(cutoff, ws.shape[1]))
-                        ws[:, cutoff:] = self.G_mapping(torch.randn_like(z), c, skip_w_avg_update=True)[:, cutoff:]
-            if generator_mode == 'random_z_image_c':
-                assert img is not None
-                with torch.no_grad():
-                    D = self.D_ema if self.D_ema is not None else self.D
-                    with misc.ddp_sync(D, sync):
-                        estimated_c = misc.get_func(D, 'get_estimated_camera')(img)[0].detach()
-                        if estimated_c.size(-1) == 16:
-                            synthesis_kwargs['camera_RT'] = estimated_c
-                        if estimated_c.size(-1) == 3:
-                            synthesis_kwargs['camera_UV'] = estimated_c
-            with misc.ddp_sync(self.G_synthesis, sync):
-                out = self.G_synthesis(ws, **synthesis_kwargs)
-        else:
-            raise NotImplementedError(f'wrong generator_mode {generator_mode}')
+    def run_G(self, z, c, sync):
+        with misc.ddp_sync(self.G_mapping, sync):
+            ws  = self.G_mapping(z, c)
+            if self.style_mixing_prob > 0:
+                with torch.autograd.profiler.record_function('style_mixing'):
+                    cutoff = torch.empty([], dtype=torch.int64, device=ws.device).random_(1, ws.shape[1])
+                    cutoff = torch.where(torch.rand([], device=ws.device) < self.style_mixing_prob, cutoff, torch.full_like(cutoff, ws.shape[1]))
+                    ws[:, cutoff:] = self.G_mapping(torch.randn_like(z), c, skip_w_avg_update=True)[:, cutoff:]
+        with misc.ddp_sync(self.G_synthesis, sync):
+            out = self.G_synthesis(ws)
         return out, ws
 
     def run_D(self, img, c, sync):
@@ -169,10 +127,9 @@ class StyleGAN2Loss(Loss):
 
         # Gmain: Maximize logits for generated images.
         loss_Gmain, reg_loss = 0, 0
-        if isinstance(fake_img, dict): fake_img = fake_img['img']
         if do_Gmain:
             with torch.autograd.profiler.record_function('Gmain_forward'):
-                gen_img, gen_ws = self.run_G(gen_z, gen_c, sync=(sync and not do_Gpl), img=fake_img)   # May get synced by Gpl.
+                gen_img, gen_ws = self.run_G(gen_z, gen_c, sync=(sync and not do_Gpl))   # May get synced by Gpl.
                 reg_loss  += self.get_loss(gen_img, 'G')
                 gen_logits = self.run_D(gen_img, gen_c, sync=False)
                 reg_loss  += self.get_loss(gen_logits, 'G')
@@ -197,13 +154,10 @@ class StyleGAN2Loss(Loss):
         if do_Gpl and (self.pl_weight != 0):
             with torch.autograd.profiler.record_function('Gpl_forward'):
                 batch_size = max(1, gen_z.shape[0] // self.pl_batch_shrink)
-                gen_img, gen_ws = self.run_G(
-                    gen_z[:batch_size], gen_c[:batch_size], sync=sync, 
-                    img=fake_img[:batch_size] if fake_img is not None else None)
+                gen_img, gen_ws = self.run_G(gen_z[:batch_size], gen_c[:batch_size], sync=sync)
                 if isinstance(gen_img, dict):  gen_img = gen_img['img']
                 pl_noise = torch.randn_like(gen_img) / np.sqrt(gen_img.shape[2] * gen_img.shape[3])
                 with torch.autograd.profiler.record_function('pl_grads'), conv2d_gradfix.no_weight_gradients():
-                # with torch.autograd.profiler.record_function('pl_grads'):
                     pl_grads = torch.autograd.grad(outputs=[(gen_img * pl_noise).sum()], inputs=[gen_ws], create_graph=True, only_inputs=True, allow_unused=True)[0]
                 pl_lengths = pl_grads.square().sum(2).mean(1).sqrt()
                 pl_mean = self.pl_mean.lerp(pl_lengths.mean(), self.pl_decay)
@@ -222,7 +176,7 @@ class StyleGAN2Loss(Loss):
         loss_Dgen, reg_loss = 0, 0
         if do_Dmain:
             with torch.autograd.profiler.record_function('Dgen_forward'):
-                gen_img    = self.run_G(gen_z, gen_c, sync=False, img=fake_img)[0]                
+                gen_img    = self.run_G(gen_z, gen_c, sync=False)[0]                
                 reg_loss  += self.get_loss(gen_img, 'D')
                 gen_logits = self.run_D(gen_img, gen_c, sync=False) # Gets synced by loss_Dreal.
                 reg_loss  += self.get_loss(gen_logits, 'D')

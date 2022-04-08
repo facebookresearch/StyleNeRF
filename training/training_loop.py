@@ -138,18 +138,12 @@ def training_loop(
     training_set = dnnlib.util.construct_class_by_name(**training_set_kwargs)  # subclass of training.dataset.Dataset
     
     # Setup dataloader/sampler
-    # if getattr(G.synthesis, 'sampler', None) is not None:
-    #     raise NotImplementedError('ERROR NEED TO TAKE A LOOK')
-    #     # training_set_sampler = G.synthesis.sampler[0](
-    #     #     dataset=training_set, rank=rank, num_replicas=world_size, 
-    #     #     seed=random_seed, device=device, **G.synthesis.sampler[1])
-    # else:
     training_set_sampler = misc.InfiniteSampler(
             dataset=training_set, rank=rank, num_replicas=world_size, seed=random_seed)
     training_set_iterator = iter(torch.utils.data.DataLoader(
         dataset=training_set, sampler=training_set_sampler, batch_size=batch_size//world_size, **data_loader_kwargs))
     if generation_with_image:
-        backup_data_iterator  = iter(torch.utils.data.DataLoader(
+        backup_data_iterator = iter(torch.utils.data.DataLoader(
             dataset=copy.deepcopy(training_set), sampler=training_set_sampler, batch_size=batch_size//world_size, **data_loader_kwargs))
 
 
@@ -212,8 +206,6 @@ def training_loop(
         print(f'Distributing across {world_size} GPUs...')
     ddp_modules = dict()
     module_list = [('G_mapping', G.mapping), ('G_synthesis', G.synthesis), ('D', D), (None, G_ema), ('augment_pipe', augment_pipe)]
-    if G.encoder is not None:
-        module_list += [('G_encoder', G.encoder)]
     if disc_enable_ema:
         module_list += [('D_ema', D_ema)]
     for name, module in module_list:

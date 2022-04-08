@@ -1035,7 +1035,6 @@ class Generator(torch.nn.Module):
         img_channels,               # Number of output color channels.
         mapping_kwargs      = {},   # Arguments for MappingNetwork.
         synthesis_kwargs    = {},   # Arguments for SynthesisNetwork.
-        encoder_kwargs      = {},   # Arguments for Encoder (optional)
     ):
         super().__init__()
         self.z_dim = z_dim
@@ -1047,34 +1046,15 @@ class Generator(torch.nn.Module):
             class_name=synthesis_kwargs.get('module_name', "training.networks.SynthesisNetwork"),
             w_dim=w_dim, img_resolution=img_resolution, img_channels=img_channels, **synthesis_kwargs)
         self.num_ws  = self.synthesis.num_ws
-        self.mapping = None
-        self.encoder = None
-
-        if len(mapping_kwargs) > 0:   # Use mapping network
-            self.mapping = util.construct_class_by_name(
-                class_name=mapping_kwargs.get('module_name', "training.networks.MappingNetwork"),
-                z_dim=z_dim, c_dim=c_dim, w_dim=w_dim, num_ws=self.num_ws, **mapping_kwargs)
-        
-        if len(encoder_kwargs) > 0:   # Use Image-Encoder
-            encoder_kwargs['model_kwargs'].update({'num_ws': self.num_ws, 'w_dim': self.w_dim})
-            self.encoder = util.construct_class_by_name(
-               img_resolution=img_resolution, 
-               img_channels=img_channels,
-               **encoder_kwargs) 
+        self.mapping = util.construct_class_by_name(
+            class_name=mapping_kwargs.get('module_name', "training.networks.MappingNetwork"),
+            z_dim=z_dim, c_dim=c_dim, w_dim=w_dim, num_ws=self.num_ws, **mapping_kwargs)
         
     def forward(self, z=None, c=None, styles=None, truncation_psi=1, truncation_cutoff=None, img=None, **synthesis_kwargs):
         if styles is None:
-            assert z is not None
-            if (self.encoder is not None) and (img is not None):  #TODO: debug
-                outputs = self.encoder(img)
-                ws = outputs['ws']
-                if ('camera' in outputs) and ('camera_mode' not in synthesis_kwargs):
-                    synthesis_kwargs['camera_RT'] = outputs['camera']
-            else:
-                ws = self.mapping(z, c, truncation_psi=truncation_psi, truncation_cutoff=truncation_cutoff, **synthesis_kwargs)
+            ws = self.mapping(z, c, truncation_psi=truncation_psi, truncation_cutoff=truncation_cutoff, **synthesis_kwargs)
         else:
             ws = styles
-
         img = self.synthesis(ws, **synthesis_kwargs)
         return img
 

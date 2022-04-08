@@ -1693,12 +1693,10 @@ class NeRFSynthesisNetwork(torch.nn.Module):
         # cameras, background codes
         if self.camera_condition is not None:
             cam_cond = self.get_camera_samples(batch_size, ws, block_kwargs, gen_cond=True)
-        
         if "camera_matrices" not in block_kwargs:
             block_kwargs['camera_matrices'] = self.get_camera_samples(batch_size, ws, block_kwargs)
         if (self.camera_condition is not None) and (cam_cond is None):
             cam_cond = block_kwargs['camera_matrices']
-           
         block_kwargs['theta'] = self.C.get_roll(ws, self.training, **block_kwargs)
         
         # get latent codes instead of style vectors (used in GRAF & GIRAFFE)
