@@ -1475,6 +1475,7 @@ class InstanceNormLayer3d(torch.nn.Module):
             x = x*weight + bias
         return x
 
+
 @persistence.persistent_class      
 class FeatureVolume(torch.nn.Module):
     def __init__(

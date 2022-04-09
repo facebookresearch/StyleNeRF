@@ -1987,11 +1987,11 @@ class Discriminator(torch.nn.Module):
         
         # camera prediction module
         self.camera_kwargs = EasyDict(
-            predict_camera=False, 
-            predict_styles=False,
+            predict_camera=False,
             camera_type='3d', 
             camera_encoder=True, 
-            camera_encoder_progressive=False, 
+            camera_encoder_progressive=False,
+            camera_encoder_with_dual_disc=False,
             camera_disc=True)
         
         ## ------ for compitibility ------- #
@@ -2024,11 +2024,6 @@ class Discriminator(torch.nn.Module):
         if self.c_dim > 0:
             self.mapping = MappingNetwork(z_dim=0, c_dim=self.c_dim, w_dim=cmap_dim, num_ws=None, w_avg_beta=None, **mapping_kwargs)
   
-        if self.camera_kwargs.predict_styles:
-            self.w_dim, self.num_ws = self.camera_kwargs.w_dim, self.camera_kwargs.num_ws
-            self.projector_styles = EqualConv2d(channels_dict[4], self.w_dim * self.num_ws, 4, padding=0, bias=False)
-            self.mapping_styles = MappingNetwork(z_dim=0, c_dim=self.w_dim * self.num_ws, w_dim=cmap_dim, num_ws=None, w_avg_beta=None, **mapping_kwargs)
-        
         # main discriminator blocks
         common_kwargs = dict(img_channels=self.img_channels, architecture=architecture, conv_clamp=conv_clamp)    
         
@@ -2050,7 +2045,7 @@ class Discriminator(torch.nn.Module):
         build_blocks(layer_name='b')  # main blocks
         if self.dual_discriminator:
             build_blocks(layer_name='dual', low_resolution=True)
-        if self.camera_kwargs.camera_encoder:
+        if self.camera_kwargs.camera_encoder and (not self.camera_kwargs.camera_encoder_with_dual_disc):
             build_blocks(layer_name='c', low_resolution=(not self.camera_kwargs.camera_encoder_progressive))
 
         # final output module
@@ -2080,7 +2075,6 @@ class Discriminator(torch.nn.Module):
         block_resolutions, alpha, lowres_head = self.get_block_resolutions(img)
         layer_name, progressive = 'b', self.progressive
         if mode == "cam_enc":        
-            assert self.camera_kwargs.predict_camera and self.camera_kwargs.camera_encoder
             layer_name = 'c'
             if not self.camera_kwargs.camera_encoder_progressive:
                 block_resolutions, progressive = [r for r in self.block_resolutions if r <= self.lowres_head], False
@@ -2106,14 +2100,12 @@ class Discriminator(torch.nn.Module):
         
         output = {}
         if (mode == 'cam_enc') or \
+           (mode == 'dual' and self.camera_kwargs.camera_encoder and self.camera_kwargs.camera_encoder_with_dual_disc) or \
            (mode == 'disc' and self.camera_kwargs.predict_camera and (not self.camera_kwargs.camera_encoder)):
             c = self.projector(x)[:,:,0,0]
             if self.camera_kwargs.camera_type == '9d':
                 c = camera_9d_to_16d(c)    
             output['cam'] = c
-            if self.camera_kwargs.predict_styles:
-                w = self.projector_styles(x)[:,:,0,0]
-                output['styles'] = w
         return output, x, img
 
     def get_camera_loss(self, RT=None, UV=None, c=None):
@@ -2123,11 +2115,6 @@ class Discriminator(torch.nn.Module):
             return F.mse_loss(UV, c)
         else:
             return F.smooth_l1_loss(RT.reshape(RT.size(0), -1), c) * 10
-
-    def get_styles_loss(self, WS=None, w=None):
-        if WS is None:
-            return None
-        return F.mse_loss(WS, w) * 0.1
         
     def get_block_resolutions(self, input_img):
         block_resolutions = self.block_resolutions
@@ -2171,41 +2158,33 @@ class Discriminator(torch.nn.Module):
         no_condition = (c.size(-1) == 0)
         
         # forward separate camera encoder, which can also be progressive...
-        if self.camera_kwargs.camera_encoder:
+        if self.camera_kwargs.camera_encoder and (not self.camera_kwargs.camera_encoder_with_dual_disc):
             out_camenc, _, _ = self.forward_blocks_progressive(img, mode='cam_enc', **block_kwargs)
             if no_condition and ('cam' in out_camenc):
-                c, camera_loss = out_camenc['cam'], self.get_camera_loss(RT, UV, out_camenc['cam'])
-                if 'styles' in out_camenc:
-                    w, styles_loss = out_camenc['styles'], self.get_styles_loss(WS, out_camenc['styles'])
-                no_condition = False
+                c, camera_loss, no_condition = out_camenc['cam'], self.get_camera_loss(RT, UV, out_camenc['cam']), False
         
         # forward another dual discriminator only for low resolution images
-        if self.dual_discriminator and (
-            self.stop_dual_disc_at is None or self.steps < self.stop_dual_disc_at):
-            _, x_nerf, img_nerf = self.forward_blocks_progressive(inputs['img_nerf'], mode='dual_disc', **block_kwargs)
-        else:
-            x_nerf = img_nerf = None      
+        if self.dual_discriminator:
+            out_dual, x_nerf, img_nerf = self.forward_blocks_progressive(inputs['img_nerf'], mode='dual_disc', **block_kwargs)
+            if (self.stop_dual_disc_at is not None) and (self.steps < self.stop_dual_disc_at):
+                x_nerf = img_nerf = None
+            if no_condition and ('cam' in out_dual):
+                c, camera_loss, no_condition = out_dual['cam'], self.get_camera_loss(RT, UV, out_dual['cam']), False
         
         # if applied data augmentation for discriminator
         if aug_pipe is not None:
             img = aug_pipe(img)
 
-        # perform main discriminator block
+        # forward main discriminator block on current image size
         out_disc, x, img = self.forward_blocks_progressive(img, mode='disc', **block_kwargs)
         if no_condition and ('cam' in out_disc):
-            c, camera_loss = out_disc['cam'], self.get_camera_loss(RT, UV, out_disc['cam'])
-            if 'styles' in out_disc:
-                w, styles_loss = out_disc['styles'], self.get_styles_loss(WS, out_disc['styles'])
-            no_condition = False
+            c, camera_loss, no_condition = out_disc['cam'], self.get_camera_loss(RT, UV, out_disc['cam']), False
         
         # camera conditional discriminator
         cmap = None
         if self.c_dim > 0:
             cc = c.clone().detach()
             cmap = self.mapping(None, cc)
-            if self.camera_kwargs.predict_styles:
-                ww = w.clone().detach()
-                cmap = [cmap] + [self.mapping_styles(None, ww)]
                     
         logits  = self.b4(x, img, cmap)
         if x_nerf is not None and img_nerf is not None:
@@ -2214,8 +2193,6 @@ class Discriminator(torch.nn.Module):
         outputs = {'logits': logits}
         if self.camera_kwargs.predict_camera and (camera_loss is not None):
             outputs['camera_loss'] = camera_loss
-        if self.camera_kwargs.predict_styles and (styles_loss is not None):
-            outputs['styles_loss'] = styles_loss
         if return_camera:
             outputs['camera'] = c
         return outputs
