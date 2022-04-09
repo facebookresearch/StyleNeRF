@@ -1999,7 +1999,6 @@ class Discriminator(torch.nn.Module):
         self.camera_kwargs.camera_type = '9d' if unused.get('predict_9d_camera', False) else '3d'
         self.camera_kwargs.camera_disc = not unused.get('no_camera_condition', False)
         self.camera_kwargs.camera_encoder = unused.get('saperate_camera', False)
-        
         self.camera_kwargs.update(camera_kwargs)
         ## ------ for compitibility ------- #
         
@@ -2100,7 +2099,7 @@ class Discriminator(torch.nn.Module):
         
         output = {}
         if (mode == 'cam_enc') or \
-           (mode == 'dual' and self.camera_kwargs.camera_encoder and self.camera_kwargs.camera_encoder_with_dual_disc) or \
+           (mode == 'dual_disc' and self.camera_kwargs.camera_encoder and self.camera_kwargs.camera_encoder_with_dual_disc) or \
            (mode == 'disc' and self.camera_kwargs.predict_camera and (not self.camera_kwargs.camera_encoder)):
             c = self.projector(x)[:,:,0,0]
             if self.camera_kwargs.camera_type == '9d':
@@ -2179,7 +2178,7 @@ class Discriminator(torch.nn.Module):
         out_disc, x, img = self.forward_blocks_progressive(img, mode='disc', **block_kwargs)
         if no_condition and ('cam' in out_disc):
             c, camera_loss, no_condition = out_disc['cam'], self.get_camera_loss(RT, UV, out_disc['cam']), False
-        
+
         # camera conditional discriminator
         cmap = None
         if self.c_dim > 0:
