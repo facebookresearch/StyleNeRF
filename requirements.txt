@@ -1,6 +1,5 @@
 albumentations==1.0.3
 click==8.0.3
-clip-by-openai==1.1
 einops==0.3.0
 glfw==2.5.0
 gradio==2.8.13

@@ -771,38 +771,46 @@ class VolumeRenderer(object):
 
     def forward_sampling(self, H, output, fg_nerf, nerf_input_cams, nerf_input_feats, latent_codes, styles):
         # TODO: experimental research code. Not functional yet.
-         
+        assert self.sigma_type == 'exp_truncated'
+
         pixels_world, camera_world, ray_vector = nerf_input_cams
         z_shape_obj, z_app_obj = latent_codes[:2]
         height, width = dividable(H.n_points)
-        bound = self.get_bound()
-        
-        # just to simulate
-        H.n_steps = 64
-        di = torch.linspace(0., 1., steps=H.n_steps).to(H.device)
-        di = repeat(di, 's -> b n s', b=H.batch_size, n=H.n_points)
-        if (H.training and (not H.get('disable_noise', False))) or H.get('force_noise', False):
-            di = self.C.add_noise_to_interval(di)
-        di_trs = self.C.get_transformed_depth(di)
-        
+        bound = self.get_bound()        
         fg_shape = [H.batch_size, height, width, 1]
         
-        # iteration in the loop (?)
-        feats, sigmas = [], []
+        feats, sigmas, dis = [], [], []
+        di = torch.ones(H.batch_size, H.n_points, 1).to(pixels_world.device) * 0.5
+        dt = 0.0001
         with torch.enable_grad():
-            di_trs.requires_grad_(True)
-            for s in range(di_trs.shape[-1]):
-                di_s = di_trs[..., s:s+1]
+            for s in range(H.n_steps):
+                di.requires_grad_(True)
+                di_s = self.C.get_transformed_depth(di)
                 p_i, r_i = self.C.get_evaluation_points(pixels_world, camera_world, di_s)
                 if nerf_input_feats is not None:
                     p_i = self.I.query_input_features(p_i, nerf_input_feats, fg_shape, bound)        
                 feat, sigma_raw = fg_nerf(p_i, r_i, z_shape_obj, z_app_obj, ws=styles, shape=fg_shape, requires_grad=True)
                 sigma = self.get_density(sigma_raw, fg_nerf, training=H.training)
-            feats += [feat]
-            sigmas += [sigma]
-        feat, sigma = torch.stack(feats, 2), torch.cat(sigmas, 2)
+                dds_log_sigma, = grad(
+                    outputs=sigma_raw, inputs=di,
+                    grad_outputs=torch.ones_like(sigma_raw, requires_grad=False), 
+                    retain_graph=True, create_graph=True, only_inputs=True)
+                noise = torch.ones_like(sigma).normal_()
+                di = di + dt * (dds_log_sigma - sigma) + math.sqrt(2 * dt) * noise
+                # di = di.clamp(min=0, max=1)
+                
+                feats += [feat]
+                sigmas += [sigma]
+                dis += [di]
+
+        feat, sigma, di = torch.stack(feats, 2), torch.cat(sigmas, 2), torch.cat(dis, 2)
+        di, indices = torch.sort(di, dim=2)
+        di_trs = self.C.get_transformed_depth(di)
+        sigma = torch.gather(sigma, 2, indices)
+        feat = torch.gather(feat, 2, repeat(indices, 'b n s -> b n s d', d=feat.size(-1)))
+
         fg_weights, bg_lambda = self.C.calc_volume_weights(
-            sigma, di if self.C.dists_normalized else di_trs,  # use real dists for computing weights
+            sigma, di if self.C.dists_normalized else di_trs,
             ray_vector, last_dist=0 if not H.fg_inf_depth else 1e10)[:2]
         fg_feat = torch.sum(fg_weights.unsqueeze(-1) * feat, dim=-2)
         
@@ -988,9 +996,13 @@ class VolumeRenderer(object):
             # volume rendering with pre-computed density similar to tensor-decomposition
             output = self.forward_rendering_with_pre_density(
                 H, output, fg_nerf, nerf_input_cams, nerf_input_feats, latent_codes, styles)
+        elif 'sampling' in render_option:
+            assert not_render_background or self.no_background
+            output = self.forward_sampling(
+                H, output, fg_nerf, nerf_input_cams,  nerf_input_feats, latent_codes, styles)
 
         else: 
-            # standard volume rendering 
+            # standard volume rendering
             if not only_render_background:
                 output = self.forward_rendering(
                     H, output, fg_nerf, nerf_input_cams, nerf_input_feats, latent_codes, styles)
@@ -2005,15 +2017,18 @@ class Discriminator(torch.nn.Module):
         self.c_dim = c_dim
         if self.camera_kwargs.predict_camera:
             if self.camera_kwargs.camera_type == '3d':
-                self.c_dim = out_dim = 3     # (u, v) on the sphere
+                self.c_dim += 3 
+                out_dim = 3     # (u, v) on the sphere
             elif self.camera_kwargs.camera_type == '9d':
-                self.c_dim,  out_dim = 16, 9
+                self.c_dim += 16
+                out_dim = 9
             elif self.camera_kwargs.camera_type == '16d':
-                self.c_dim = out_dim = 16
+                self.c_dim += 16 
+                out_dim = 16
             else:
                 raise NotImplementedError('Wrong camera type')
             if not self.camera_kwargs.camera_disc:
-                self.c_dim = c_dim    
+                self.c_dim = c_dim  # setting back to original conditional dimension    
             self.projector = EqualConv2d(channels_dict[4], out_dim, 4, padding=0, bias=False)
              
         if cmap_dim is None:
@@ -2150,25 +2165,25 @@ class Discriminator(torch.nn.Module):
         if self.dual_input:
             img = torch.cat([img, upsample(inputs['img_nerf'], img.size(-1))], 1)
             
-        RT = inputs['camera_matrices'][1].detach() if 'camera_matrices' in inputs else None
-        UV = inputs['camera_matrices'][2].detach() if 'camera_matrices' in inputs else None
-        WS = inputs['ws_detach'].reshape(inputs['batch_size'], -1) if 'ws_detach' in inputs else None
-        
-        no_condition = (c.size(-1) == 0)
+        RT  = inputs['camera_matrices'][1].detach() if 'camera_matrices' in inputs else None
+        UV  = inputs['camera_matrices'][2].detach() if 'camera_matrices' in inputs else None
+        WS  = inputs['ws_detach'].reshape(inputs['batch_size'], -1) if 'ws_detach' in inputs else None
+        cam = None
+        need_camera = True
         
         # forward separate camera encoder, which can also be progressive...
         if self.camera_kwargs.camera_encoder and (not self.camera_kwargs.camera_encoder_with_dual_disc):
             out_camenc, _, _ = self.forward_blocks_progressive(img, mode='cam_enc', **block_kwargs)
-            if no_condition and ('cam' in out_camenc):
-                c, camera_loss, no_condition = out_camenc['cam'], self.get_camera_loss(RT, UV, out_camenc['cam']), False
+            if need_camera and ('cam' in out_camenc):
+                cam, camera_loss, need_camera = out_camenc['cam'], self.get_camera_loss(RT, UV, out_camenc['cam']), False
         
         # forward another dual discriminator only for low resolution images
         if self.dual_discriminator:
             out_dual, x_nerf, img_nerf = self.forward_blocks_progressive(inputs['img_nerf'], mode='dual_disc', **block_kwargs)
             if (self.stop_dual_disc_at is not None) and (self.steps < self.stop_dual_disc_at):
                 x_nerf = img_nerf = None
-            if no_condition and ('cam' in out_dual):
-                c, camera_loss, no_condition = out_dual['cam'], self.get_camera_loss(RT, UV, out_dual['cam']), False
+            if need_camera and ('cam' in out_dual):
+                cam, camera_loss, need_camera = out_dual['cam'], self.get_camera_loss(RT, UV, out_dual['cam']), False
         
         # if applied data augmentation for discriminator
         if aug_pipe is not None:
@@ -2176,19 +2191,20 @@ class Discriminator(torch.nn.Module):
 
         # forward main discriminator block on current image size
         out_disc, x, img = self.forward_blocks_progressive(img, mode='disc', **block_kwargs)
-        if no_condition and ('cam' in out_disc):
-            c, camera_loss, no_condition = out_disc['cam'], self.get_camera_loss(RT, UV, out_disc['cam']), False
+        if need_camera and ('cam' in out_disc):
+            cam, camera_loss, need_camera = out_disc['cam'], self.get_camera_loss(RT, UV, out_disc['cam']), False
 
         # camera conditional discriminator
         cmap = None
         if self.c_dim > 0:
-            cc = c.clone().detach()
-            cmap = self.mapping(None, cc)
+            if cam is not None:
+                cam_copy = cam.clone().detach()
+                c = cam_copy if c is None else torch.cat([c, cam_copy], -1)
+            cmap = self.mapping(None, c)
                     
         logits  = self.b4(x, img, cmap)
         if x_nerf is not None and img_nerf is not None:
             logits = torch.cat([logits, self.b4(x_nerf, img_nerf, cmap)], 0)
-                
         outputs = {'logits': logits}
         if self.camera_kwargs.predict_camera and (camera_loss is not None):
             outputs['camera_loss'] = camera_loss

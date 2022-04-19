@@ -22,6 +22,7 @@ resolution: ~
 cond: False
 subset: ~   # Train with only N images: <int>, default = all
 mirror: False
+precomputed_cond: ~
 
 # discriminator augmentation
 aug: noaug

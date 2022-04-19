@@ -74,7 +74,10 @@ def setup_training_loop_kwargs(cfg):
 
     assert cfg.data is not None
     assert isinstance(cfg.data, str)
-    args.update({"training_set_kwargs": dict(class_name='training.dataset.ImageFolderDataset', path=cfg.data, resolution=cfg.resolution, use_labels=True, max_size=None, xflip=False)})
+    args.update({"training_set_kwargs": dict(
+        class_name='training.dataset.ImageFolderDataset', 
+        path=cfg.data, resolution=cfg.resolution, precomputed_cond=cfg.precomputed_cond,
+        use_labels=True, max_size=None, xflip=False)})
     args.update({"data_loader_kwargs": dict(pin_memory=True, num_workers=3, prefetch_factor=2)})
     args.generation_with_image = getattr(cfg, 'generate_with_image', False)
     try:
@@ -82,11 +85,12 @@ def setup_training_loop_kwargs(cfg):
         args.training_set_kwargs.resolution = training_set.resolution                  # be explicit about resolution
         args.training_set_kwargs.use_labels = training_set.has_labels                  # be explicit about labels
         args.training_set_kwargs.max_size = len(training_set)                          # be explicit about dataset size
+
         desc = training_set.name
         del training_set # conserve memory
     except IOError as err:
         raise UserError(f'data: {err}')
-
+    
     if cfg.cond is None:
         cfg.cond = False
     assert isinstance(cfg.cond, bool)

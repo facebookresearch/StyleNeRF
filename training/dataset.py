@@ -159,12 +159,14 @@ class Dataset(torch.utils.data.Dataset):
 
 class ImageFolderDataset(Dataset):
     def __init__(self,
-        path,                   # Path to directory or zip.
-        resolution      = None, # Ensure specific resolution, None = highest available.
-        **super_kwargs,         # Additional arguments for the Dataset base class.
+        path,                    # Path to directory or zip.
+        resolution       = None, # Ensure specific resolution, None = highest available.
+        precomputed_cond = None, # Pre-computed condition vectors
+        **super_kwargs,          # Additional arguments for the Dataset base class.
     ):
         self._path = path
         self._zipfile = None
+        self.precomputed_cond = precomputed_cond
 
         if os.path.isdir(self._path):
             self._type = 'dir'
@@ -230,6 +232,13 @@ class ImageFolderDataset(Dataset):
         return image
 
     def _load_raw_labels(self):
+        if self.precomputed_cond is not None:
+            all_feats = np.load(self.precomputed_cond)['arr_0'].astype(np.float32)
+            if len(all_feats.shape) == 3:
+                all_feats = all_feats.mean(axis=1)   # num_files x dimension
+            print(f'Load precomputed condtions {all_feats.shape}')
+            return all_feats
+
         fname = 'dataset.json'
         if fname not in self._all_fnames:
             return None
