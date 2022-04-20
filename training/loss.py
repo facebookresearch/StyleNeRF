@@ -34,7 +34,8 @@ class StyleGAN2Loss(Loss):
         augment_pipe=None, D_ema=None,
         style_mixing_prob=0.9, r1_gamma=10, 
         pl_batch_shrink=2, pl_decay=0.01, pl_weight=2, other_weights=None,
-        curriculum=None, alpha_start=0.0, cycle_consistency=False, label_smooth=0):
+        curriculum=None, alpha_start=0.0, lc_weight=0, lc_encoder='clip:ViT-B/16', 
+        label_smooth=0):
         super().__init__()
         self.device            = device
         self.G_mapping         = G_mapping
@@ -47,13 +48,27 @@ class StyleGAN2Loss(Loss):
         self.pl_batch_shrink   = pl_batch_shrink
         self.pl_decay          = pl_decay
         self.pl_weight         = pl_weight
+        self.lc_weight         = lc_weight
         self.other_weights     = other_weights
         self.pl_mean           = torch.zeros([], device=device)
         self.curriculum        = curriculum
         self.alpha_start       = alpha_start
         self.alpha             = None
-        self.cycle_consistency = cycle_consistency
         self.label_smooth      = label_smooth
+
+        self.lc_encoder, self.lc_process = None, None
+        if self.lc_weight > 0:  # adding additional label consistency loss
+            assert lc_encoder == 'clip:ViT-B/16', "currently only support one"
+            assert self.style_mixing_prob == 0, "style mixing will ruin this"
+            
+            import clip, PIL.Image
+            import torchvision.transforms.functional as vF
+            _, arch = lc_encoder.split(':')
+            self.lc_encoder = clip.load(arch, device=device)[0]
+            # preprocess input image (range -1~1 to CLIP acceptable range)
+            self.lc_preprocess = lambda x: vF.normalize(
+                vF.resize(x * 0.5 + 0.5, size=224, interpolation=PIL.Image.BICUBIC),
+                mean=(0.48145466, 0.4578275, 0.40821073), std=(0.26862954, 0.26130258, 0.27577711))
 
     def set_alpha(self, steps):
         alpha = None
@@ -130,12 +145,21 @@ class StyleGAN2Loss(Loss):
         if do_Gmain:
             with torch.autograd.profiler.record_function('Gmain_forward'):
                 gen_img, gen_ws = self.run_G(gen_z, gen_c, sync=(sync and not do_Gpl))   # May get synced by Gpl.
-                reg_loss  += self.get_loss(gen_img, 'G')
                 gen_logits = self.run_D(gen_img, gen_c, sync=False)
+                
+                if self.lc_weight > 0 and self.lc_encoder is not None:
+                    fake_c = self.lc_encoder.encode_image(self.lc_preprocess(gen_img['img'])).type_as(gen_c)
+                    # logits = self.lc_encoder.logit_scale.exp() * fake_c @ gen_c.T
+                    # labels = torch.arange(logits.size(0), device=gen_c.device, dtype=torch.long)
+                    # c_loss = F.cross_entropy(logits, labels)
+                    c_loss = self.lc_encoder.logit_scale.exp() * (fake_c - gen_c) ** 2
+                    gen_img['lc_loss'] = c_loss
+                    
+                reg_loss  += self.get_loss(gen_img, 'G')
                 reg_loss  += self.get_loss(gen_logits, 'G')
                 if isinstance(gen_logits, dict):
                     gen_logits = gen_logits['logits']
-                    
+                
                 loss_Gmain = torch.nn.functional.softplus(-gen_logits) # -log(sigmoid(gen_logits))
                 if self.label_smooth > 0:
                     loss_Gmain = loss_Gmain * (1 - self.label_smooth) +  torch.nn.functional.softplus(gen_logits) * self.label_smooth
