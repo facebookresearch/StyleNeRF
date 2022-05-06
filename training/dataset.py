@@ -162,10 +162,12 @@ class ImageFolderDataset(Dataset):
         path,                    # Path to directory or zip.
         resolution       = None, # Ensure specific resolution, None = highest available.
         precomputed_cond = None, # Pre-computed condition vectors
+        ann_file         = None, # Additional annotation file 
         **super_kwargs,          # Additional arguments for the Dataset base class.
     ):
         self._path = path
         self._zipfile = None
+        self._ann_file = ann_file
         self.precomputed_cond = precomputed_cond
 
         if os.path.isdir(self._path):
@@ -178,7 +180,22 @@ class ImageFolderDataset(Dataset):
             raise IOError('Path must point to a directory or zip')
 
         PIL.Image.init()
-        self._image_fnames = sorted(fname for fname in self._all_fnames if self._file_ext(fname) in PIL.Image.EXTENSION)
+        if (self._ann_file is None) or (self._ann_file not in self._all_fnames):
+            self._image_fnames = sorted(fname for fname in self._all_fnames if self._file_ext(fname) in PIL.Image.EXTENSION)
+        else:
+            ## filter image
+            fname = self._ann_file
+            self._image_fnames = [fname for fname in self._all_fnames if self._file_ext(fname) in PIL.Image.EXTENSION]
+            with self._open_file(fname) as f:
+                labels = json.load(f)['labels']
+                if labels is not None:
+                    labels = dict(labels)
+                self._base_image_fnames = []
+                for fname in self._image_fnames:
+                    if labels.get(fname.replace('\\', '/'), None) is not None:
+                        self._base_image_fnames.append(fname)
+                self._image_fnames = sorted(self._base_image_fnames)
+
         if len(self._image_fnames) == 0:
             raise IOError('No image files found in the specified path')
 
@@ -226,6 +243,8 @@ class ImageFolderDataset(Dataset):
                 image = np.array(PIL.Image.open(f))
         if image.ndim == 2:
             image = image[:, :, np.newaxis] # HW => HWC
+        if image.shape[-1] == 4:
+            image = image[:, :, :3]
         if hasattr(self, '_raw_shape') and image.shape[-1] != self.resolution:  # resize input image
             image = cv2.resize(image, (self.resolution, self.resolution), interpolation=cv2.INTER_AREA)
         image = image.transpose(2, 0, 1) # HWC => CHW
@@ -239,7 +258,7 @@ class ImageFolderDataset(Dataset):
             print(f'Load precomputed condtions {all_feats.shape}')
             return all_feats
 
-        fname = 'dataset.json'
+        fname = self._ann_file # 'dataset.json'
         if fname not in self._all_fnames:
             return None
         with self._open_file(fname) as f:

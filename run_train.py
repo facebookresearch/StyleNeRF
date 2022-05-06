@@ -76,8 +76,12 @@ def setup_training_loop_kwargs(cfg):
     assert isinstance(cfg.data, str)
     args.update({"training_set_kwargs": dict(
         class_name='training.dataset.ImageFolderDataset', 
-        path=cfg.data, resolution=cfg.resolution, precomputed_cond=cfg.precomputed_cond,
-        use_labels=True, max_size=None, xflip=False)})
+        path=cfg.data, 
+        ann_file=cfg.ann_file,
+        resolution=cfg.resolution, 
+        precomputed_cond=cfg.precomputed_cond,
+        use_labels=cfg.cond,
+        max_size=None, xflip=False)})
     args.update({"data_loader_kwargs": dict(pin_memory=True, num_workers=3, prefetch_factor=2)})
     args.generation_with_image = getattr(cfg, 'generate_with_image', False)
     try:

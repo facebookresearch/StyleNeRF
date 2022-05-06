@@ -677,6 +677,7 @@ class VolumeRenderer(object):
     fine_only         = False
     no_background     = False
     white_background  = False
+    white_color       = 1.0
     mask_background   = False
     pre_volume_size   = None
     
@@ -693,12 +694,10 @@ class VolumeRenderer(object):
         self.C = camera_ray
         self.I = input_encoding
 
-    def split_feat(self, x, img_channels, white_color=None, split_rgb=True):
+    def split_feat(self, x, img_channels, split_rgb=True):
         img = x[:, :img_channels]
         if split_rgb:
             x = x[:, img_channels:]
-        if (white_color is not None) and self.white_background:
-            img = img + white_color
         return x, img
 
     def get_bound(self):
@@ -876,6 +875,11 @@ class VolumeRenderer(object):
                 sigma, di if self.C.dists_normalized else di_trs,  # use real dists for computing weights, 
                 ray_vector, last_dist=0 if not H.fg_inf_depth else 1e10)[:2]
 
+        if self.white_background:
+            fg_weights = torch.cat([fg_weights, 1 - fg_weights.sum(-1, keepdim=True)], 2)
+            feat = torch.cat([feat, feat.new_ones(feat.size(0), feat.size(1), 1, feat.size(3)) * self.white_color], 2)
+            di = torch.cat([di, 1e10 * torch.ones_like(di[:,:,:1])], 2)
+            di_trs = torch.cat([di_trs, 1e10 * torch.ones_like(di_trs[:,:,:1])], 2)
         fg_feat = torch.sum(fg_weights.unsqueeze(-1) * feat, dim=-2)
         
         output.feat       += [fg_feat]
@@ -1021,8 +1025,7 @@ class VolumeRenderer(object):
         feat_map  = sum(output.feat)
         full_x    = rearrange(feat_map[:, :vol_len], 'b (h w) d -> b d h w', h=H.tgt_res)
         split_rgb = fg_nerf.add_rgb or fg_nerf.predict_rgb
-        
-        full_out = self.split_feat(full_x, H.img_channels, None, split_rgb=split_rgb) 
+        full_out  = self.split_feat(full_x, H.img_channels, split_rgb=split_rgb) 
         if rand_pixels is not None:   # used in full supervision (debug later)
             if return_full:
                 assert (fg_nerf.predict_rgb or fg_nerf.add_rgb)
@@ -1842,8 +1845,6 @@ class NeRFSynthesisNetwork(torch.nn.Module):
                         lh, lw = img_rand.size(2) // self.n_reg_samples, img_rand.size(3) // self.n_reg_samples
                         img_rand = rearrange(img_rand, 'b d (l h) (m w) -> b d (l m) h w', l=lh, m=lw)
                         img_rand = (img_rand * rand_probs[:, None]).sum(2)
-                        if self.V.white_background:
-                            img_rand = img_rand + (1 - rand_probs.sum(1, keepdim=True))
                     rand_indexs = repeat(rand_indexs, 'b n -> b d n', d=img_rand.size(1))
                     img_ff = rearrange(rearrange(img, 'b d l h -> b d (l h)').gather(2, rand_indexs), 'b d (l h) -> b d l h', l=self.n_reg_samples)
                 
@@ -2168,7 +2169,7 @@ class Discriminator(torch.nn.Module):
         RT  = inputs['camera_matrices'][1].detach() if 'camera_matrices' in inputs else None
         UV  = inputs['camera_matrices'][2].detach() if 'camera_matrices' in inputs else None
         WS  = inputs['ws_detach'].reshape(inputs['batch_size'], -1) if 'ws_detach' in inputs else None
-        cam = None
+        cam = x_nerf = img_nerf = None
         need_camera = True
         
         # forward separate camera encoder, which can also be progressive...

@@ -54,6 +54,7 @@ os.environ['PYOPENGL_PLATFORM'] = 'egl'
 @click.option('--n_steps', default=8, type=int, help="number of steps for each seed")
 @click.option('--no-video', default=False)
 @click.option('--relative_range_u_scale', default=1.0, type=float, help="relative scale on top of the original range u")
+@click.option('--precomputed-cond', default=None, type=str)
 def generate_images(
     ctx: click.Context,
     network_pkl: str,
@@ -67,7 +68,8 @@ def generate_images(
     render_option=None,
     n_steps=8,
     no_video=False,
-    relative_range_u_scale=1.0
+    relative_range_u_scale=1.0,
+    precomputed_cond=None
 ):
 
     
@@ -84,14 +86,23 @@ def generate_images(
     os.makedirs(outdir, exist_ok=True)
 
     # Labels.
-    label = torch.zeros([1, G.c_dim], device=device)
-    if G.c_dim != 0:
-        if class_idx is None:
-            ctx.fail('Must specify class label with --class when using a conditional network')
-        label[:, class_idx] = 1
+    if precomputed_cond is not None:
+        all_feats = np.load(precomputed_cond)['arr_0'].astype(np.float32)
+        if len(all_feats.shape) == 3:
+            all_feats = all_feats.mean(axis=1)   # num_files x dimension
+        print(f'Load precomputed condtions {all_feats.shape}')
+        a = np.random.randint(all_feats.shape[0])
+        label = torch.from_numpy(all_feats[a:a+2]).to(device)
+
     else:
-        if class_idx is not None:
-            print ('warn: --class=lbl ignored when running on an unconditional network')
+        label = torch.zeros([1, G.c_dim], device=device)
+        if G.c_dim != 0:
+            if class_idx is None:
+                ctx.fail('Must specify class label with --class when using a conditional network')
+            label[:, class_idx] = 1
+        else:
+            if class_idx is not None:
+                print ('warn: --class=lbl ignored when running on an unconditional network')
 
     # avoid persistent classes... 
     from training.networks import Generator

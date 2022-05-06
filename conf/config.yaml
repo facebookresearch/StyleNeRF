@@ -18,6 +18,7 @@ auto: False
 
 # dataset
 data: ~
+ann_file: ~
 resolution: ~
 cond: False
 subset: ~   # Train with only N images: <int>, default = all
