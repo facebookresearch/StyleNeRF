@@ -2005,7 +2005,9 @@ class Discriminator(torch.nn.Module):
             camera_encoder=True, 
             camera_encoder_progressive=False,
             camera_encoder_with_dual_disc=False,
-            camera_disc=True)
+            camera_disc=True,
+            clip_encoder=False
+            )
         
         ## ------ for compitibility ------- #
         self.camera_kwargs.predict_camera = unused.get('predict_camera', False)
@@ -2062,6 +2064,10 @@ class Discriminator(torch.nn.Module):
             build_blocks(layer_name='dual', low_resolution=True)
         if self.camera_kwargs.camera_encoder and (not self.camera_kwargs.camera_encoder_with_dual_disc):
             build_blocks(layer_name='c', low_resolution=(not self.camera_kwargs.camera_encoder_progressive))
+        if self.camera_kwargs.clip_encoder:
+            import clip
+            self.clip_encoder = clip.load('ViT-B/16')[0]
+            self.clip_encoder.requires_grad_(False)           
 
         # final output module
         self.b4 = DiscriminatorEpilogue(channels_dict[4], cmap_dim=cmap_dim, resolution=4, **epilogue_kwargs, **common_kwargs)
@@ -2081,6 +2087,12 @@ class Discriminator(torch.nn.Module):
     def set_steps(self, steps):
         if hasattr(self, 'steps'):
             self.steps.fill_(steps / 1e3)
+
+    @staticmethod
+    def clip_encoder_preprocess(x):
+        import PIL.Image, torchvision.transforms.functional as vF
+        return vF.normalize(vF.resize(x * 0.5 + 0.5, size=224, interpolation=PIL.Image.BICUBIC),
+                mean=(0.48145466, 0.4578275, 0.40821073), std=(0.26862954, 0.26130258, 0.27577711))
     
     def forward_blocks_progressive(self, img, mode="disc", **block_kwargs):
         # mode from ['disc', 'dual_disc', 'cam_enc']
@@ -2181,11 +2193,16 @@ class Discriminator(torch.nn.Module):
         # forward another dual discriminator only for low resolution images
         if self.dual_discriminator:
             out_dual, x_nerf, img_nerf = self.forward_blocks_progressive(inputs['img_nerf'], mode='dual_disc', **block_kwargs)
-            if (self.stop_dual_disc_at is not None) and (self.steps < self.stop_dual_disc_at):
+            if (self.stop_dual_disc_at is not None) and (self.steps >= self.stop_dual_disc_at):
                 x_nerf = img_nerf = None
             if need_camera and ('cam' in out_dual):
                 cam, camera_loss, need_camera = out_dual['cam'], self.get_camera_loss(RT, UV, out_dual['cam']), False
         
+        # use clip encoder?
+        if self.camera_kwargs.clip_encoder:
+            self.clip_encoder.requires_grad_(False)
+            c = self.clip_encoder.encode_image(Discriminator.clip_encoder_preprocess(img)).type_as(img)
+
         # if applied data augmentation for discriminator
         if aug_pipe is not None:
             img = aug_pipe(img)
@@ -2195,12 +2212,12 @@ class Discriminator(torch.nn.Module):
         if need_camera and ('cam' in out_disc):
             cam, camera_loss, need_camera = out_disc['cam'], self.get_camera_loss(RT, UV, out_disc['cam']), False
 
-        # camera conditional discriminator
+        # camera/clip conditional discriminator
         cmap = None
         if self.c_dim > 0:
             if cam is not None:
                 cam_copy = cam.clone().detach()
-                c = cam_copy if c is None else torch.cat([c, cam_copy], -1)
+                c = cam_copy if c is None else torch.cat([c.detach(), cam_copy], -1)
             cmap = self.mapping(None, c)
                     
         logits  = self.b4(x, img, cmap)
