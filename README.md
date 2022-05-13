@@ -25,6 +25,8 @@ Please refer to https://github.com/NVlabs/stylegan2-ada-pytorch for additional s
 ## Dataset
 We follow the same dataset format as [StyleGAN2-ADA](https://github.com/NVlabs/stylegan2-ada-pytorch#preparing-datasets) supported, which can be either an image folder, or a zipped file.
 
+You can also download the zipped datasets from [Hugging Face 🤗](https://huggingface.co/datasets/thomagram/StyleNeRF_Datasets).
+
 ## Pretrained Checkpoints
 You can download the pre-trained checkpoints (used in our paper) and some recent variants trained with current codebase as follows:
 | Dataset   | Resolution | #Params(M) | Config |                           Download                           |
