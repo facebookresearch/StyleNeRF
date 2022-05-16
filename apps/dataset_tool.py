@@ -50,8 +50,12 @@ def is_image_ext(fname: Union[str, Path]) -> bool:
 #----------------------------------------------------------------------------
 
 def open_image_folder(source_dir, *, max_images: Optional[int]):
+    import glob
+    
     input_images = [str(f) for f in sorted(Path(source_dir).rglob('*')) if is_image_ext(f) and os.path.isfile(f)]
-    from fairseq import pdb;pdb.set_trace()
+    # input_images = sorted(glob.glob(source_dir +'/*.png'))
+    # from fairseq import pdb;pdb.set_trace()
+
     # Load labels.
     labels = {}
     meta_fname = os.path.join(source_dir, 'dataset.json')

@@ -1012,7 +1012,7 @@ class VolumeRenderer(object):
                     H, output, fg_nerf, nerf_input_cams, nerf_input_feats, latent_codes, styles)
                 
             # background rendering (NeRF++)
-            if (not not_render_background) and (not self.no_background):
+            if (not not_render_background) and (not self.no_background) and ('nobg' not in render_option):
                 output = self.forward_rendering_background(
                     H, output, bg_nerf, nerf_input_cams, latent_codes, styles_bg)
                          
@@ -1956,7 +1956,8 @@ class Discriminator(torch.nn.Module):
         conv_clamp          = None,     # Clamp the output of convolution layers to +-X, None = disable clamping.
         cmap_dim            = None,     # Dimensionality of mapped conditioning label, None = default.
         lowres_head         = None,     # add a low-resolution discriminator head
-        dual_discriminator  = False,    # add low-resolution (NeRF) image 
+        dual_discriminator  = False,    # add low-resolution (NeRF) image
+        dual_disc_saperate  = False,    # dual discriminator did not share the last layer
         stop_dual_disc_at   = None,     # stop using dual discriminator after certain steps
         dual_input          = False,    # add low-resolution (NeRF) image directly on the input.
         
@@ -1982,6 +1983,7 @@ class Discriminator(torch.nn.Module):
         self.lowres_head         = lowres_head
 
         self.dual_discriminator  = dual_discriminator
+        self.dual_disc_saperate  = dual_disc_saperate
         self.dual_input          = dual_input
         self.upsample_type       = upsample_type
         self.progressive         = progressive
@@ -2018,6 +2020,8 @@ class Discriminator(torch.nn.Module):
         ## ------ for compitibility ------- #
         
         self.c_dim = c_dim
+        if self.camera_kwargs.clip_encoder:
+            self.c_dim = 512
         if self.camera_kwargs.predict_camera:
             if self.camera_kwargs.camera_type == '3d':
                 self.c_dim += 3 
@@ -2071,6 +2075,9 @@ class Discriminator(torch.nn.Module):
 
         # final output module
         self.b4 = DiscriminatorEpilogue(channels_dict[4], cmap_dim=cmap_dim, resolution=4, **epilogue_kwargs, **common_kwargs)
+        if self.dual_disc_saperate and self.dual_discriminator:
+            self.b4_dual = DiscriminatorEpilogue(channels_dict[4], cmap_dim=cmap_dim, resolution=4, **epilogue_kwargs, **common_kwargs)
+
         self.register_buffer("alpha", torch.scalar_tensor(-1))
         
         self.stop_dual_disc_at = stop_dual_disc_at
@@ -2202,6 +2209,7 @@ class Discriminator(torch.nn.Module):
         if self.camera_kwargs.clip_encoder:
             self.clip_encoder.requires_grad_(False)
             c = self.clip_encoder.encode_image(Discriminator.clip_encoder_preprocess(img)).type_as(img)
+            c = c / c.norm(p=2, dim=-1, keepdim=True)  # normalize?
 
         # if applied data augmentation for discriminator
         if aug_pipe is not None:
@@ -2217,12 +2225,13 @@ class Discriminator(torch.nn.Module):
         if self.c_dim > 0:
             if cam is not None:
                 cam_copy = cam.clone().detach()
-                c = cam_copy if c is None else torch.cat([c.detach(), cam_copy], -1)
+                c = cam_copy if c is None else torch.cat([c, cam_copy], -1)
             cmap = self.mapping(None, c)
                     
         logits  = self.b4(x, img, cmap)
         if x_nerf is not None and img_nerf is not None:
-            logits = torch.cat([logits, self.b4(x_nerf, img_nerf, cmap)], 0)
+            logits_dual = self.b4(x_nerf, img_nerf, cmap) if not self.dual_disc_saperate else self.b4_dual(x_nerf, img_nerf, cmap)  
+            logits = torch.cat([logits, logits_dual], 0)
         outputs = {'logits': logits}
         if self.camera_kwargs.predict_camera and (camera_loss is not None):
             outputs['camera_loss'] = camera_loss

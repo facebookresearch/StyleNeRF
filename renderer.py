@@ -123,10 +123,9 @@ class Renderer(object):
 
     def render_rotation_camera3(self, styles=None, *args, **kwargs): 
         gen = self.generator.synthesis
-        n_steps = 36  # 120
+        batch_size, n_steps = kwargs.get('batch_size', 2), kwargs.get("n_steps", 32)
 
         if styles is None:
-            batch_size = 2
             if 'img' not in kwargs:
                 ws = self.generator.mapping(*args, **kwargs)
             else:

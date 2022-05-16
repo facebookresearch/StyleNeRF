@@ -23,3 +23,5 @@ scripts/research/
 .ipynb_checkpoints/
 _screenshots/
 flagged
+gradio_cached_examples/
+gradio_queue.db

@@ -44,6 +44,7 @@ os.environ['PYOPENGL_PLATFORM'] = 'egl'
 @click.pass_context
 @click.option('--network', 'network_pkl', help='Network pickle filename', required=True)
 @click.option('--seeds', type=num_range, help='List of random seeds')
+@click.option('--batch-size', type=int, default=2)
 @click.option('--trunc', 'truncation_psi', type=float, help='Truncation psi', default=1, show_default=True)
 @click.option('--class', 'class_idx', type=int, help='Class label (unconditional if not specified)')
 @click.option('--noise-mode', help='Noise mode', type=click.Choice(['const', 'random', 'none']), default='const', show_default=True)
@@ -59,6 +60,7 @@ def generate_images(
     ctx: click.Context,
     network_pkl: str,
     seeds: Optional[List[int]],
+    batch_size: int,
     truncation_psi: float,
     noise_mode: str,
     outdir: str,
@@ -137,7 +139,7 @@ def generate_images(
         for seed_idx, seed in enumerate(seeds):
             print('Generating image for seed %d (%d/%d) ...' % (seed, seed_idx, len(seeds)))
             G2.set_random_seed(seed)
-            z = torch.from_numpy(np.random.RandomState(seed).randn(2, G.z_dim)).to(device)
+            z = torch.from_numpy(np.random.RandomState(seed).randn(batch_size, G.z_dim)).to(device)
             relative_range_u = [0.5 - 0.5 * relative_range_u_scale, 0.5 + 0.5 * relative_range_u_scale]
             outputs = G2(
                 z=z,
@@ -146,6 +148,7 @@ def generate_images(
                 noise_mode=noise_mode,
                 render_option=render_option,
                 n_steps=n_steps,
+                batch_size=batch_size,
                 relative_range_u=relative_range_u,
                 return_cameras=True)
             if isinstance(outputs, tuple):
