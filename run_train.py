@@ -174,6 +174,9 @@ def setup_training_loop_kwargs(cfg):
     elif cfg.aug == 'fixed':
         if cfg.p is None:
             raise UserError(f'--aug={cfg.aug} requires specifying --p')
+    elif cfg.aug == 'linear':
+        args.ada_target = 0.6
+        args.ada_linear = True
     else:
         raise UserError(f'--aug={cfg.aug} not supported')
 

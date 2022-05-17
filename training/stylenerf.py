@@ -497,7 +497,12 @@ class CameraRay(object):
         else:
             if theta is not None:
                 theta = torch.ones(ws.size(0)).to(ws.device) * theta
-        return theta
+        if theta is not None:
+            normalized_theta = theta * 180 / math.pi
+            normalized_theta = (normalized_theta + self.random_rotate / 2) / self.random_rotate
+        else:
+            normalized_theta = None
+        return theta, normalized_theta
 
     def get_camera(self, batch_size, device, mode='random', fov=None, force_uniform=False):
         if fov is not None:
@@ -643,7 +648,10 @@ class CameraRay(object):
         full_pixels = arange_pixels((tgt_res, tgt_res), 
             batch_size, invert_y_axis=invert_y, margin=margin,
             corner_aligned=corner_aligned).to(device)
-        if (theta is not None):
+        if isinstance(theta, tuple):
+            theta = theta[0]
+
+        if theta is not None:
             theta = theta.unsqueeze(-1)
             x = full_pixels[..., 0] * torch.cos(theta) - full_pixels[..., 1] * torch.sin(theta)
             y = full_pixels[..., 0] * torch.sin(theta) + full_pixels[..., 1] * torch.cos(theta)
@@ -2023,13 +2031,16 @@ class Discriminator(torch.nn.Module):
         if self.camera_kwargs.clip_encoder:
             self.c_dim = 512
         if self.camera_kwargs.predict_camera:
-            if self.camera_kwargs.camera_type == '3d':
+            if self.camera_kwargs.camera_type == '3d':    # predict u, v, r (usually constant)
                 self.c_dim += 3 
                 out_dim = 3     # (u, v) on the sphere
-            elif self.camera_kwargs.camera_type == '9d':
+            elif self.camera_kwargs.camera_type == '4d':  # predict u, v, r (usually constant) and roll (camera rotation)
+                self.c_dim += 4
+                out_dim = 4
+            elif self.camera_kwargs.camera_type == '9d':  # predict something transformed to 16D
                 self.c_dim += 16
                 out_dim = 9
-            elif self.camera_kwargs.camera_type == '16d':
+            elif self.camera_kwargs.camera_type == '16d': # predict extrinsic matrix directly
                 self.c_dim += 16 
                 out_dim = 16
             else:
@@ -2145,7 +2156,9 @@ class Discriminator(torch.nn.Module):
     def get_camera_loss(self, RT=None, UV=None, c=None):
         if (RT is None) or (UV is None):
             return None
-        if self.camera_kwargs.camera_type == '3d':  # UV has higher priority?
+        if (self.camera_kwargs.camera_type == '3d'):
+            return F.mse_loss(UV, c)
+        elif (self.camera_kwargs.camera_type == '4d'):
             return F.mse_loss(UV, c)
         else:
             return F.smooth_l1_loss(RT.reshape(RT.size(0), -1), c) * 10
@@ -2187,6 +2200,8 @@ class Discriminator(torch.nn.Module):
             
         RT  = inputs['camera_matrices'][1].detach() if 'camera_matrices' in inputs else None
         UV  = inputs['camera_matrices'][2].detach() if 'camera_matrices' in inputs else None
+        if (self.camera_kwargs.camera_type == '4d') and ('theta' in inputs):
+            UV = torch.cat([UV, inputs['theta'][1][:, None]], 1)
         WS  = inputs['ws_detach'].reshape(inputs['batch_size'], -1) if 'ws_detach' in inputs else None
         cam = x_nerf = img_nerf = None
         need_camera = True
