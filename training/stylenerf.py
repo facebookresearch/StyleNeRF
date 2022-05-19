@@ -1720,7 +1720,7 @@ class NeRFSynthesisNetwork(torch.nn.Module):
             block_kwargs['camera_matrices'] = self.get_camera_samples(batch_size, ws, block_kwargs)
         if (self.camera_condition is not None) and (cam_cond is None):
             cam_cond = block_kwargs['camera_matrices']
-        block_kwargs['theta'] = self.C.get_roll(ws, self.training, **block_kwargs)
+        block_kwargs['theta'] = self.get_roll(ws, self.training, **block_kwargs)
         
         # get latent codes instead of style vectors (used in GRAF & GIRAFFE)
         if "latent_codes" not in block_kwargs:
@@ -1909,6 +1909,14 @@ class NeRFSynthesisNetwork(torch.nn.Module):
     def get_camera(self, *args, **kwargs):   # for compitability
         return self.C.get_camera(*args, **kwargs)
     
+    def get_roll(self, ws, training=True, theta_mode=None, **kwargs):
+        if theta_mode is None:
+            return self.C.get_roll(ws, training, **kwargs)
+        else:
+            half_theta = self.C.random_rotate / 2
+            theta = (theta_mode * (2 * half_theta) - half_theta) * math.pi / 180
+            return theta, theta_mode
+
     def get_camera_samples(self, batch_size, ws, block_kwargs, gen_cond=False):
         if gen_cond:  # camera condition for generator (? a special variant)
             if ('camera_matrices' in block_kwargs) and (not self.training):  # this is for rendering
@@ -1921,6 +1929,9 @@ class NeRFSynthesisNetwork(torch.nn.Module):
         elif 'camera_mode' in block_kwargs:
             camera_matrices = self.get_camera(batch_size, device=ws.device, mode=block_kwargs["camera_mode"])    
         
+        elif 'camera_uv' in block_kwargs:
+            camera_matrices = self.get_camera(batch_size, device=ws.device, mode=block_kwargs["camera_uv"], force_uniform=True) 
+
         else:
             if self.predict_camera:
                 rand_mode = ws.new_zeros(ws.size(0), 2)
@@ -2011,6 +2022,7 @@ class Discriminator(torch.nn.Module):
         # camera prediction module
         self.camera_kwargs = EasyDict(
             predict_camera=False,
+            predict_styles=False,
             camera_type='3d', 
             camera_encoder=True, 
             camera_encoder_progressive=False,
@@ -2046,9 +2058,11 @@ class Discriminator(torch.nn.Module):
             else:
                 raise NotImplementedError('Wrong camera type')
             if not self.camera_kwargs.camera_disc:
-                self.c_dim = c_dim  # setting back to original conditional dimension    
+                self.c_dim = c_dim  # setting back to original conditional dimension
+            if self.camera_kwargs.predict_styles:
+                out_dim += 512      # FIXME: fix me later. hard coded dimention
             self.projector = EqualConv2d(channels_dict[4], out_dim, 4, padding=0, bias=False)
-             
+
         if cmap_dim is None:
             cmap_dim = channels_dict[4]
         if self.c_dim == 0:
@@ -2151,6 +2165,9 @@ class Discriminator(torch.nn.Module):
             if self.camera_kwargs.camera_type == '9d':
                 c = camera_9d_to_16d(c)    
             output['cam'] = c
+            if self.camera_kwargs.predict_styles:
+                output['ws']  = output['cam'][:, :512]  # FIXME: later 
+                output['cam'] = output['cam'][:, 512:]
         return output, x, img
 
     def get_camera_loss(self, RT=None, UV=None, c=None):
@@ -2184,7 +2201,7 @@ class Discriminator(torch.nn.Module):
                 block_resolutions = [res for res in self.block_resolutions if res <= lowres_head]
         return block_resolutions, alpha, lowres_head
 
-    def forward(self, inputs, c=None, aug_pipe=None, return_camera=False, **block_kwargs):
+    def forward(self, inputs, c=None, aug_pipe=None, **block_kwargs):
         if not isinstance(inputs, dict):
             inputs = {'img': inputs}
         img = inputs['img']
@@ -2202,23 +2219,24 @@ class Discriminator(torch.nn.Module):
         UV  = inputs['camera_matrices'][2].detach() if 'camera_matrices' in inputs else None
         if (self.camera_kwargs.camera_type == '4d') and ('theta' in inputs):
             UV = torch.cat([UV, inputs['theta'][1][:, None]], 1)
-        WS  = inputs['ws_detach'].reshape(inputs['batch_size'], -1) if 'ws_detach' in inputs else None
-        cam = x_nerf = img_nerf = None
+        WS  = inputs['ws_detach'] if 'ws_detach' in inputs else None
+        x_nerf = img_nerf = None
         need_camera = True
-        
+        out_block = {}
+
         # forward separate camera encoder, which can also be progressive...
         if self.camera_kwargs.camera_encoder and (not self.camera_kwargs.camera_encoder_with_dual_disc):
-            out_camenc, _, _ = self.forward_blocks_progressive(img, mode='cam_enc', **block_kwargs)
-            if need_camera and ('cam' in out_camenc):
-                cam, camera_loss, need_camera = out_camenc['cam'], self.get_camera_loss(RT, UV, out_camenc['cam']), False
+            _block, _, _ = self.forward_blocks_progressive(img, mode='cam_enc', **block_kwargs)
+            if need_camera and ('cam' in _block):
+               need_camera, out_block = False, _block
         
         # forward another dual discriminator only for low resolution images
         if self.dual_discriminator:
-            out_dual, x_nerf, img_nerf = self.forward_blocks_progressive(inputs['img_nerf'], mode='dual_disc', **block_kwargs)
+            _block, x_nerf, img_nerf = self.forward_blocks_progressive(inputs['img_nerf'], mode='dual_disc', **block_kwargs)
             if (self.stop_dual_disc_at is not None) and (self.steps >= self.stop_dual_disc_at):
                 x_nerf = img_nerf = None
-            if need_camera and ('cam' in out_dual):
-                cam, camera_loss, need_camera = out_dual['cam'], self.get_camera_loss(RT, UV, out_dual['cam']), False
+            if need_camera and ('cam' in _block):
+                need_camera, out_block = False, _block
         
         # use clip encoder?
         if self.camera_kwargs.clip_encoder:
@@ -2231,13 +2249,14 @@ class Discriminator(torch.nn.Module):
             img = aug_pipe(img)
 
         # forward main discriminator block on current image size
-        out_disc, x, img = self.forward_blocks_progressive(img, mode='disc', **block_kwargs)
-        if need_camera and ('cam' in out_disc):
-            cam, camera_loss, need_camera = out_disc['cam'], self.get_camera_loss(RT, UV, out_disc['cam']), False
+        _block, x, img = self.forward_blocks_progressive(img, mode='disc', **block_kwargs)
+        if need_camera and ('cam' in _block):
+            need_camera, out_block = False, _block
 
         # camera/clip conditional discriminator
         cmap = None
         if self.c_dim > 0:
+            cam = out_block.get('cam', None)
             if cam is not None:
                 cam_copy = cam.clone().detach()
                 c = cam_copy if c is None else torch.cat([c, cam_copy], -1)
@@ -2248,10 +2267,15 @@ class Discriminator(torch.nn.Module):
             logits_dual = self.b4(x_nerf, img_nerf, cmap) if not self.dual_disc_saperate else self.b4_dual(x_nerf, img_nerf, cmap)  
             logits = torch.cat([logits, logits_dual], 0)
         outputs = {'logits': logits}
-        if self.camera_kwargs.predict_camera and (camera_loss is not None):
-            outputs['camera_loss'] = camera_loss
-        if return_camera:
-            outputs['camera'] = c
+
+        # compute camera loss
+        if self.camera_kwargs.predict_camera and ('cam' in out_block):
+            outputs['camera_loss'] = self.get_camera_loss(RT, UV, out_block['cam'])
+            if self.camera_kwargs.predict_styles and ('ws' in out_block):
+                outputs['style_loss'] = F.smooth_l1_loss(WS[:, 0], out_block['ws'], beta=4.0) if WS is not None else None
+
+        outputs['camera'] = out_block.get('cam', None)
+        outputs['styles'] = out_block.get('ws', None)
         return outputs
 
       
