@@ -111,7 +111,7 @@ class StyleGAN2Loss(Loss):
             
         elif (generator_mode == 'random_z_random_c') or (generator_mode == 'random_z_image_c'):
             with misc.ddp_sync(self.G_mapping, sync):
-                ws  = self.G_mapping(z, c)
+                ws  = self.G_mapping(z, c).clone()
                 if self.style_mixing_prob > 0:
                     with torch.autograd.profiler.record_function('style_mixing'):
                         cutoff = torch.empty([], dtype=torch.int64, device=ws.device).random_(1, ws.shape[1])

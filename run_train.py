@@ -1,7 +1,7 @@
 # Copyright (c) Facebook, Inc. and its affiliates. All Rights Reserved
 
 
-from math import dist
+# from math import dist
 import sys
 import os
 import click
