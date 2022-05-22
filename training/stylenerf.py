@@ -2023,13 +2023,14 @@ class Discriminator(torch.nn.Module):
         self.camera_kwargs = EasyDict(
             predict_camera=False,
             predict_styles=False,
+            predict_styles_loss=True,
             camera_type='3d', 
             camera_encoder=True, 
             camera_encoder_progressive=False,
             camera_encoder_with_dual_disc=False,
             camera_disc=True,
             clip_encoder=False
-            )
+        )
         
         ## ------ for compitibility ------- #
         self.camera_kwargs.predict_camera = unused.get('predict_camera', False)
@@ -2201,7 +2202,7 @@ class Discriminator(torch.nn.Module):
                 block_resolutions = [res for res in self.block_resolutions if res <= lowres_head]
         return block_resolutions, alpha, lowres_head
 
-    def forward(self, inputs, c=None, aug_pipe=None, **block_kwargs):
+    def forward(self, inputs, c=None, aug_pipe=None, return_camera=False, **block_kwargs):
         if not isinstance(inputs, dict):
             inputs = {'img': inputs}
         img = inputs['img']
@@ -2270,12 +2271,16 @@ class Discriminator(torch.nn.Module):
 
         # compute camera loss
         if self.camera_kwargs.predict_camera and ('cam' in out_block):
-            outputs['camera_loss'] = self.get_camera_loss(RT, UV, out_block['cam'])
-            if self.camera_kwargs.predict_styles and ('ws' in out_block):
-                outputs['style_loss'] = F.smooth_l1_loss(WS[:, 0], out_block['ws'], beta=4.0) if WS is not None else None
-
-        outputs['camera'] = out_block.get('cam', None)
-        outputs['styles'] = out_block.get('ws', None)
+            camera_loss = self.get_camera_loss(RT, UV, out_block['cam'])
+            if camera_loss is not None:
+                outputs['camera_loss'] = camera_loss
+            if self.camera_kwargs.predict_styles and \
+                self.camera_kwargs.predict_styles_loss and \
+                ('ws' in out_block) and (WS is not None):
+                outputs['style_loss'] = F.smooth_l1_loss(WS[:, 0], out_block['ws'], beta=4.0)
+        if return_camera:
+            outputs['camera'] = out_block.get('cam', None)
+            outputs['styles'] = out_block.get('ws', None)
         return outputs
 
       

@@ -109,9 +109,9 @@ class StyleGAN2Loss(Loss):
             out = self.G_synthesis(ws)
         return out, ws
 
-    def run_D(self, img, c, sync):
+    def run_D(self, img, c, sync, return_camera=False):
         with misc.ddp_sync(self.D, sync):
-            logits = self.D(img, c, aug_pipe=self.augment_pipe)
+            logits = self.D(img, c, aug_pipe=self.augment_pipe, return_camera=return_camera)
         return logits
 
     def run_reconstruction(self, img, logits, sync):
@@ -122,6 +122,10 @@ class StyleGAN2Loss(Loss):
                 if logits['camera'].size(1) == 4:
                     inputs['theta_mode'] = logits['camera'][:, 3]            
             out_img = self.G_synthesis(**inputs)['img']
+
+        # save_image(img['img']/2+0.5, '/private/home/jgu/work/stylegan2/debug/real_3.png', nrow=2)
+        # save_image(out_img/2+0.5, '/private/home/jgu/work/stylegan2/debug/recn_3.png', nrow=2)
+        # from fairseq import pdb;pdb.set_trace()
         logits['recon_loss'] = F.mse_loss(out_img, img['img'])
         return logits
 
@@ -242,11 +246,13 @@ class StyleGAN2Loss(Loss):
                 else:
                     real_img = real_img.requires_grad_(do_Dr1)
 
-                real_logits = self.run_D(real_img, real_c, sync=sync) # =False if self.recon_weight > 0 else 
-                # if self.recon_weight > 0:
-                #     assert 'styles' in real_logits, "the decoder has to predict the styles if doing this."
-                #     real_logits = self.run_reconstruction(real_img, real_logits, sync=sync)
-                #     reg_loss   += self.get_loss(real_logits, 'D')
+                if self.recon_weight > 0:
+                    real_logits = self.run_D(real_img, real_c, sync=False, return_camera=True)
+                    assert 'styles' in real_logits, "the decoder has to predict the styles if doing this."
+                    real_logits = self.run_reconstruction(real_img, real_logits, sync=sync)
+                    reg_loss   += self.get_loss(real_logits, 'D')
+                else:
+                    real_logits = self.run_D(real_img, real_c, sync=sync)
 
                 if isinstance(real_logits, dict):
                     real_logits = real_logits['logits']

@@ -32,6 +32,25 @@ from torch_utils.ops import bias_act
 from torch_utils.ops import fma
 from torch_utils.ops import filtered_lrelu
 
+from torchvision import models as tv_models
+
+
+def get_resnet_model(name):
+    if name is None:
+        name = 'resnet18'
+    return {
+        'resnet18': tv_models.resnet18,
+        'resnet34': tv_models.resnet34,
+        'resnet50': tv_models.resnet50,
+        'resnet101': tv_models.resnet101,
+        'resnet152': tv_models.resnet152,
+        'resnext50_32x4d': tv_models.resnext50_32x4d,
+        'resnext101_32x8d': tv_models.resnext101_32x8d,
+        'wide_resnet50_2': tv_models.wide_resnet50_2,
+        'wide_resnet101_2': tv_models.wide_resnet101_2,
+    }[name]
+
+
 #----------------------------------------------------------------------------
 
 @misc.profiled_function
