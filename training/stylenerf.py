@@ -2248,7 +2248,7 @@ class Discriminator(torch.nn.Module):
         # forward main discriminator block on current image size
         _block, x, img = self.forward_blocks_progressive(img, mode='disc', **block_kwargs)
         if need_camera and ('cam' in _block):
-            need_camera, out_block = False, _block
+            need_camera, out_block['cam'] = False, _block['cam']
 
         # camera/clip conditional discriminator
         cmap = None
