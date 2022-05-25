@@ -13,10 +13,11 @@ G_kwargs:
         # global settings
         num_fp16_res: ${num_fp16_res}
         channel_base: 1
-        channel_max: 512
+        channel_max: 1024
         conv_clamp: 256
-        kernel_size: 3
+        kernel_size: 1
         architecture: skip
+        upsample_mode: "nn_cat"
 
         z_dim: 0
         resolution_vol: 128
@@ -64,13 +65,15 @@ G_kwargs:
             out_dim: 32
 
         upsampler_kwargs:
+            channel_base: ${model.G_kwargs.synthesis_kwargs.channel_base}
+            channel_max:  ${model.G_kwargs.synthesis_kwargs.channel_max}
             no_2d_renderer: False
+            no_residual_img: False
             block_reses: ~
             shared_rgb_style: False
             upsample_type: "bilinear"
         
-        progressive: False
-        prog_nerf_only: True
+        progressive: True
 
         # reuglarization
         n_reg_samples: 0
@@ -86,8 +89,8 @@ D_kwargs:
     channel_max: 512
     conv_clamp: 256
     architecture: skip
-    progressive: False
-    dual_input_res: 128
+    progressive: ${model.G_kwargs.synthesis_kwargs.progressive}
+    lowres_head: ${model.G_kwargs.synthesis_kwargs.resolution_start}
     upsample_type: "bilinear"
     resize_real_early: True
 
@@ -97,4 +100,4 @@ loss_kwargs:
     pl_decay: 0.01
     pl_weight: 2
     style_mixing_prob: 0.9
-    curriculum: [0,5000]
+    curriculum: [500,5000]

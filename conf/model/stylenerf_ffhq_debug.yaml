@@ -54,8 +54,6 @@ G_kwargs:
             use_style: "StyleGAN2"
             predict_rgb: False
             use_viewdirs: False
-            add_rgb: True
-            n_blocks: 0
 
         input_kwargs:
             output_mode: 'tri_plane_reshape'
@@ -67,6 +65,8 @@ G_kwargs:
             keep_nerf_latents: False
 
         upsampler_kwargs:
+            channel_base: ${model.G_kwargs.synthesis_kwargs.channel_base}
+            channel_max:  ${model.G_kwargs.synthesis_kwargs.channel_max}
             no_2d_renderer: False
             no_residual_img: False
             block_reses: ~

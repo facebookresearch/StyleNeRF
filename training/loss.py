@@ -107,25 +107,28 @@ class StyleGAN2Loss(Loss):
                     ws[:, cutoff:] = self.G_mapping(torch.randn_like(z), c, skip_w_avg_update=True)[:, cutoff:]
         with misc.ddp_sync(self.G_synthesis, sync):
             out = self.G_synthesis(ws)
+        out['ws_detach'] = ws.detach()
         return out, ws
 
     def run_D(self, img, c, sync, return_camera=False):
         with misc.ddp_sync(self.D, sync):
+            img['w_avg'] = misc.get_func(self.G_mapping, 'w_avg')
             logits = self.D(img, c, aug_pipe=self.augment_pipe, return_camera=return_camera)
         return logits
 
     def run_reconstruction(self, img, logits, sync):
         with misc.ddp_sync(self.G_synthesis, sync):
-            inputs = {'ws': logits['styles'][:,None].repeat([1, misc.get_func(self.G_synthesis, 'num_ws'), 1])}
+            inputs = {
+                'ws': logits['styles'][:,None].repeat([1, misc.get_func(self.G_synthesis, 'num_ws'), 1]),
+            }
             if 'camera' in logits:
                 inputs['camera_uv'] = logits['camera'][:,:3]
                 if logits['camera'].size(1) == 4:
                     inputs['theta_mode'] = logits['camera'][:, 3]            
             out_img = self.G_synthesis(**inputs)['img']
 
-        # save_image(img['img']/2+0.5, '/private/home/jgu/work/stylegan2/debug/real_3.png', nrow=2)
-        # save_image(out_img/2+0.5, '/private/home/jgu/work/stylegan2/debug/recn_3.png', nrow=2)
-        # from fairseq import pdb;pdb.set_trace()
+        # save_image(img['img']/2+0.5, '/private/home/jgu/work/stylegan2/debug/real_4.png', nrow=2)
+        # save_image(out_img/2+0.5, '/private/home/jgu/work/stylegan2/debug/recn_4.png', nrow=2)
         logits['recon_loss'] = F.mse_loss(out_img, img['img'])
         return logits
 
@@ -174,7 +177,7 @@ class StyleGAN2Loss(Loss):
                     gen_img['lc_loss'] = c_loss
                     
                 reg_loss  += self.get_loss(gen_img, 'G')
-                reg_loss  += self.get_loss(gen_logits, 'G')
+                reg_loss  += self.get_loss(gen_logits, 'G')  #FIXME #  try not adding this loss in G?
                 if isinstance(gen_logits, dict):
                     gen_logits = gen_logits['logits']
                 
@@ -246,7 +249,7 @@ class StyleGAN2Loss(Loss):
                 else:
                     real_img = real_img.requires_grad_(do_Dr1)
 
-                if self.recon_weight > 0:
+                if self.recon_weight > 0 and (self.alpha > 0):
                     real_logits = self.run_D(real_img, real_c, sync=False, return_camera=True)
                     assert 'styles' in real_logits, "the decoder has to predict the styles if doing this."
                     real_logits = self.run_reconstruction(real_img, real_logits, sync=sync)

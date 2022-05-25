@@ -1139,7 +1139,7 @@ class DiscriminatorBlock(torch.nn.Module):
             self.skip = Conv2dLayer(tmp_channels, out_channels, kernel_size=1, bias=False, down=2,
                 trainable=next(trainable_iter), resample_filter=resample_filter, channels_last=self.channels_last)
 
-    def forward(self, x, img, force_fp32=False, downsampler=None):
+    def forward(self, x, img, force_fp32=False, downsampler=None, **unused):
         dtype = torch.float16 if self.use_fp16 and not force_fp32 else torch.float32
         memory_format = torch.channels_last if self.channels_last and not force_fp32 else torch.contiguous_format
 
