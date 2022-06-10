@@ -1,0 +1,1 @@
+#backup nsvf/stylenerf/backup_models/stylenerf_best_models.zip  56GB

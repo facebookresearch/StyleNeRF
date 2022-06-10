@@ -2214,9 +2214,9 @@ class Discriminator(torch.nn.Module):
         UV  = inputs['camera_matrices'][2].detach() if 'camera_matrices' in inputs else None
         if (self.camera_kwargs.camera_type == '4d') and ('theta' in inputs):
             UV = torch.cat([UV, inputs['theta'][1][:, None]], 1)
-        WS  = inputs['ws_detach'] if 'ws_detach' in inputs else None
-        if (WS is not None) and (inputs.get('w_avg', None) is not None):
-            WS = WS - inputs['w_avg'][None, None, :]   # predict delta-W
+        # WS  = inputs['ws_detach'] if 'ws_detach' in inputs else None
+        # if (WS is not None) and (inputs.get('w_avg', None) is not None):
+        #     WS = WS - inputs['w_avg'][None, None, :]   # predict delta-W
         
         x_nerf = img_nerf = None
         need_camera = True
@@ -2271,15 +2271,14 @@ class Discriminator(torch.nn.Module):
             if camera_loss is not None:
                 outputs['camera_loss'] = camera_loss
         
-        if self.camera_kwargs.predict_styles and \
-            self.camera_kwargs.predict_styles_loss and \
-            ('ws' in out_block) and (WS is not None):
-            outputs['style_loss'] = F.smooth_l1_loss(WS[:, 0], out_block['ws'], beta=4.0)
+        # if self.camera_kwargs.predict_styles and \
+        #     self.camera_kwargs.predict_styles_loss and \
+        #     ('ws' in out_block) and (WS is not None):
+        #     outputs['style_loss'] = F.smooth_l1_loss(WS[:, 0], out_block['ws'], beta=4.0)
         if return_camera:
             outputs['camera'] = out_block.get('cam', None)
+        if self.camera_kwargs.predict_styles:
             outputs['styles'] = out_block.get('ws', None)
-            if inputs.get('w_avg', None) is not None:
-                outputs['styles'] += inputs['w_avg'][None, :]
         return outputs
 
       

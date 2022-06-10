@@ -115,6 +115,7 @@ def generate_images(
         misc.copy_params_and_buffers(G, G2, require_all=False)
         # D2 = Discriminator(*D.init_args, **D.init_kwargs).to(device)
         # misc.copy_params_and_buffers(D, D2, require_all=False)
+    print(G2)
     G2 = Renderer(G2, D, program=render_program)
     
     # Generate images.

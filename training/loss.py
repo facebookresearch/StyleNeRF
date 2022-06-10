@@ -30,12 +30,12 @@ class Loss:
 
 class StyleGAN2Loss(Loss):
     def __init__(
-        self, device, G_mapping, G_synthesis, D, 
+        self, device, G_mapping, G_synthesis, D,
+        G_encoder=None, 
         augment_pipe=None, D_ema=None,
         style_mixing_prob=0.9, r1_gamma=10, 
         pl_batch_shrink=2, pl_decay=0.01, pl_weight=2, other_weights=None,
         curriculum=None, alpha_start=0.0, 
-        lc_weight=0, lc_encoder='clip:ViT-B/16', 
         recon_weight=0,
         label_smooth=0):
         super().__init__()
@@ -50,7 +50,6 @@ class StyleGAN2Loss(Loss):
         self.pl_batch_shrink   = pl_batch_shrink
         self.pl_decay          = pl_decay
         self.pl_weight         = pl_weight
-        self.lc_weight         = lc_weight
         self.recon_weight      = recon_weight
         self.other_weights     = other_weights
         self.pl_mean           = torch.zeros([], device=device)
@@ -58,20 +57,6 @@ class StyleGAN2Loss(Loss):
         self.alpha_start       = alpha_start
         self.alpha             = None
         self.label_smooth      = label_smooth
-
-        self.lc_encoder, self.lc_process = None, None
-        if self.lc_weight > 0:  # adding additional label consistency loss
-            assert lc_encoder == 'clip:ViT-B/16', "currently only support one"
-            assert self.style_mixing_prob == 0, "style mixing will ruin this"
-            
-            import clip, PIL.Image
-            import torchvision.transforms.functional as vF
-            _, arch = lc_encoder.split(':')
-            self.lc_encoder = clip.load(arch, device=device)[0]
-            # preprocess input image (range -1~1 to CLIP acceptable range)
-            self.lc_preprocess = lambda x: vF.normalize(
-                vF.resize(x * 0.5 + 0.5, size=224, interpolation=PIL.Image.BICUBIC),
-                mean=(0.48145466, 0.4578275, 0.40821073), std=(0.26862954, 0.26130258, 0.27577711))
 
     def set_alpha(self, steps):
         alpha = None
@@ -116,21 +101,28 @@ class StyleGAN2Loss(Loss):
             logits = self.D(img, c, aug_pipe=self.augment_pipe, return_camera=return_camera)
         return logits
 
-    def run_reconstruction(self, img, logits, sync):
+    def run_img_reconstruction(self, img, logits, c, sync):
+        pred_z = logits['styles']
+        with misc.ddp_sync(self.G_mapping, sync):
+            ws  = self.G_mapping(pred_z, c)
         with misc.ddp_sync(self.G_synthesis, sync):
-            inputs = {
-                'ws': logits['styles'][:,None].repeat([1, misc.get_func(self.G_synthesis, 'num_ws'), 1]),
-            }
+            inputs = {}
             if 'camera' in logits:
                 inputs['camera_uv'] = logits['camera'][:,:3]
                 if logits['camera'].size(1) == 4:
                     inputs['theta_mode'] = logits['camera'][:, 3]            
-            out_img = self.G_synthesis(**inputs)['img']
+            out_img = self.G_synthesis(ws, **inputs)['img']
 
-        # save_image(img['img']/2+0.5, '/private/home/jgu/work/stylegan2/debug/real_4.png', nrow=2)
-        # save_image(out_img/2+0.5, '/private/home/jgu/work/stylegan2/debug/recn_4.png', nrow=2)
-        logits['recon_loss'] = F.mse_loss(out_img, img['img'])
-        return logits
+        # save_image(img['img']/2+0.5, '/private/home/jgu/work/stylegan2/debug/real_5.png', nrow=2)
+        # save_image(out_img/2+0.5, '/private/home/jgu/work/stylegan2/debug/recn_5.png', nrow=2)
+        # from fairseq import pdb;pdb.set_trace()
+        return F.smooth_l1_loss(out_img, img['img']) * 5.0
+
+    def run_ws_reconstruction(self, pred_z, gen_c, gen_ws, sync):
+        with misc.ddp_sync(self.G_mapping, sync):
+            pred_ws  = self.G_mapping(pred_z, gen_c)
+        loss_ws = F.l1_loss(pred_ws, gen_ws).mean() * 10
+        return loss_ws
 
     def get_loss(self, outputs, module='D'):
         reg_loss, logs, del_keys = 0, [], []
@@ -167,15 +159,9 @@ class StyleGAN2Loss(Loss):
             with torch.autograd.profiler.record_function('Gmain_forward'):
                 gen_img, gen_ws = self.run_G(gen_z, gen_c, sync=(sync and not do_Gpl))   # May get synced by Gpl.
                 gen_logits = self.run_D(gen_img, gen_c, sync=False)
-                
-                if self.lc_weight > 0 and self.lc_encoder is not None:
-                    fake_c = self.lc_encoder.encode_image(self.lc_preprocess(gen_img['img'])).type_as(gen_c)
-                    # logits = self.lc_encoder.logit_scale.exp() * fake_c @ gen_c.T
-                    # labels = torch.arange(logits.size(0), device=gen_c.device, dtype=torch.long)
-                    # c_loss = F.cross_entropy(logits, labels)
-                    c_loss = self.lc_encoder.logit_scale.exp() * (fake_c - gen_c) ** 2
-                    gen_img['lc_loss'] = c_loss
-                    
+                if 'styles' in gen_logits:
+                    reg_loss += gen_logits['styles'].mean() * 0.0   # dummy, avoid bugs
+                    # gen_logits['style_loss'] = self.run_ws_reconstruction(gen_logits['styles'], gen_c, gen_ws.detach(), sync=False)
                 reg_loss  += self.get_loss(gen_img, 'G')
                 reg_loss  += self.get_loss(gen_logits, 'G')  #FIXME #  try not adding this loss in G?
                 if isinstance(gen_logits, dict):
@@ -221,9 +207,11 @@ class StyleGAN2Loss(Loss):
         loss_Dgen, reg_loss = 0, 0
         if do_Dmain:
             with torch.autograd.profiler.record_function('Dgen_forward'):
-                gen_img    = self.run_G(gen_z, gen_c, sync=False)[0]                
-                reg_loss  += self.get_loss(gen_img, 'D')
+                gen_img, gen_ws = self.run_G(gen_z, gen_c, sync=False)                
                 gen_logits = self.run_D(gen_img, gen_c, sync=False) # Gets synced by loss_Dreal.
+                if 'styles' in gen_logits:
+                    gen_logits['style_loss'] = self.run_ws_reconstruction(gen_logits['styles'], gen_c, gen_ws.detach(), sync=False)
+                reg_loss  += self.get_loss(gen_img, 'D')
                 reg_loss  += self.get_loss(gen_logits, 'D')
                 if isinstance(gen_logits, dict):
                     gen_logits = gen_logits['logits']
@@ -249,10 +237,12 @@ class StyleGAN2Loss(Loss):
                 else:
                     real_img = real_img.requires_grad_(do_Dr1)
 
-                if self.recon_weight > 0 and (self.alpha > 0):
+                if self.recon_weight > 0:
                     real_logits = self.run_D(real_img, real_c, sync=False, return_camera=True)
                     assert 'styles' in real_logits, "the decoder has to predict the styles if doing this."
-                    real_logits = self.run_reconstruction(real_img, real_logits, sync=sync)
+                    real_logits['recon_loss'] = self.run_img_reconstruction(real_img, real_logits, real_c, sync=sync)
+                    if self.alpha == 0:
+                        real_logits['recon_loss'] *= 0
                     reg_loss   += self.get_loss(real_logits, 'D')
                 else:
                     real_logits = self.run_D(real_img, real_c, sync=sync)
