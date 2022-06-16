@@ -198,7 +198,7 @@ def check_ddp_consistency(module, ignore_regex=None):
 #----------------------------------------------------------------------------
 # Print summary table of module hierarchy.
 
-def print_module_summary(module, inputs, max_nesting=3, skip_redundant=True):
+def print_module_summary(module, inputs, max_nesting=3, skip_redundant=True, rank=0):
     assert isinstance(module, torch.nn.Module)
     assert not isinstance(module, torch.jit.ScriptModule)
     assert isinstance(inputs, (tuple, list))
@@ -262,10 +262,11 @@ def print_module_summary(module, inputs, max_nesting=3, skip_redundant=True):
 
     # Print table.
     widths = [max(len(cell) for cell in column) for column in zip(*rows)]
-    print()
-    for row in rows:
-        print('  '.join(cell + ' ' * (width - len(cell)) for cell, width in zip(row, widths)))
-    print()
+    if rank == 0:
+        print()
+        for row in rows:
+            print('  '.join(cell + ' ' * (width - len(cell)) for cell, width in zip(row, widths)))
+        print()
     return outputs
 
 #----------------------------------------------------------------------------
